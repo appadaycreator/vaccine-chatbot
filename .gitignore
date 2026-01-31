@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pdf
+.DS_Store
+
+# Streamlit / Python caches
+.streamlit/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local vector DB / artifacts (in case they appear)
+chroma/
+chromadb/
+*.sqlite3
