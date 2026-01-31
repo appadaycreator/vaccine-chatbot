@@ -120,6 +120,10 @@ function main() {
   const saveBtn = $("saveApiBase");
 
   apiBaseEl.value = loadApiBase();
+  // M2 Mac mini (8GB) では軽量モデルをデフォルトにする
+  if (modelEl && !modelEl.value) {
+    modelEl.value = "gemma2:2b";
+  }
   saveBtn.addEventListener("click", () => {
     const v = normalizeApiBase(apiBaseEl.value);
     saveApiBase(v);
@@ -130,7 +134,7 @@ function main() {
     e.preventDefault();
     const apiBase = normalizeApiBase(apiBaseEl.value);
     const prompt = (promptEl.value || "").trim();
-    const model = (modelEl.value || "gemma2").trim();
+    const model = (modelEl.value || "gemma2:2b").trim();
     const k = Number(kEl.value || 3);
     if (!apiBase) {
       setStatus("API Base URL を入力してください。", true);
