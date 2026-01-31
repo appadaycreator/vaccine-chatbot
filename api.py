@@ -1,3 +1,4 @@
+import asyncio
 import os
 from typing import Any
 
@@ -14,6 +15,8 @@ from pydantic import BaseModel, Field
 DEFAULT_PDF_PATH = "vaccine_manual.pdf"
 DEFAULT_PERSIST_DIR = "./chroma_db"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
+MAX_CONTEXT_CHARS = 5000
+MAX_DOC_CHARS = 1400
 
 
 app = FastAPI(title="vaccine-chatbot API", version="0.1.0")
@@ -31,10 +34,13 @@ class ChatRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
     model: str = Field(default="gemma2", min_length=1, max_length=100)
     k: int = Field(default=3, ge=1, le=20)
+    max_tokens: int = Field(default=256, ge=32, le=1024)
+    timeout_s: int = Field(default=180, ge=10, le=600)
 
 
 def _format_context(docs) -> str:
     lines: list[str] = []
+    total = 0
     for doc in docs:
         meta = doc.metadata or {}
         # PyPDFLoader は page=0始まりで入ることが多いので+1して表示
@@ -44,7 +50,13 @@ def _format_context(docs) -> str:
         else:
             page_label = "P?"
         text = (doc.page_content or "").strip()
-        lines.append(f"[{page_label}] {text}")
+        if len(text) > MAX_DOC_CHARS:
+            text = text[:MAX_DOC_CHARS] + "…"
+        line = f"[{page_label}] {text}"
+        if total + len(line) > MAX_CONTEXT_CHARS:
+            break
+        lines.append(line)
+        total += len(line)
     return "\n".join(lines)
 
 
@@ -164,7 +176,16 @@ async def chat_endpoint(request: ChatRequest):
                 },
             )
 
-        docs = vs.similarity_search(request.prompt, k=request.k)
+        try:
+            docs = await asyncio.wait_for(
+                asyncio.to_thread(vs.similarity_search, request.prompt, k=request.k),
+                timeout=request.timeout_s,
+            )
+        except TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail={"message": "検索（embedding/類似検索）がタイムアウトしました", "timeout_s": request.timeout_s},
+            )
 
         context = _format_context(docs)
         full_prompt = f"""
@@ -179,7 +200,21 @@ async def chat_endpoint(request: ChatRequest):
 回答:
 """.strip()
 
-        response = ollama.generate(model=request.model, prompt=full_prompt)
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    ollama.generate,
+                    model=request.model,
+                    prompt=full_prompt,
+                    options={"num_predict": request.max_tokens},
+                ),
+                timeout=request.timeout_s,
+            )
+        except TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail={"message": "生成（LLM応答）がタイムアウトしました", "timeout_s": request.timeout_s},
+            )
 
         return {
             "answer": response.get("response", ""),
