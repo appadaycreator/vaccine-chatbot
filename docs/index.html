@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>vaccine-chatbot（GitHub Pages）</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="header__title">
+        <h1>vaccine-chatbot</h1>
+        <p class="muted">GitHub Pages から API（FastAPI）を叩く簡易チャットUI</p>
+      </div>
+      <div class="header__links">
+        <a href="./" aria-label="reload">reload</a>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="card">
+        <h2>接続先</h2>
+        <div class="row">
+          <label for="apiBase">API Base URL</label>
+          <input
+            id="apiBase"
+            type="url"
+            placeholder="https://xxxx.trycloudflare.com"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="saveApiBase" class="btn btn--secondary" type="button">保存</button>
+        </div>
+        <p class="muted">
+          GitHub Pages（HTTPS）からは <code>http://localhost:8000</code> へ直接アクセスできません（Mixed
+          Content）。<br />
+          <code>cloudflared tunnel --url http://localhost:8000</code> で発行される HTTPS URL を指定してください。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>設定</h2>
+        <div class="row row--wrap">
+          <div class="field">
+            <label for="model">モデル</label>
+            <select id="model">
+              <option value="gemma2">gemma2</option>
+              <option value="llama3.1">llama3.1</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="k">検索 k</label>
+            <input id="k" type="number" min="1" max="20" step="1" value="3" />
+          </div>
+        </div>
+      </section>
+
+      <section class="card card--chat">
+        <h2>チャット</h2>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <form id="chatForm" class="composer">
+          <input
+            id="prompt"
+            type="text"
+            placeholder="質問を入力…"
+            autocomplete="off"
+            spellcheck="true"
+            required
+          />
+          <button id="send" class="btn" type="submit">送信</button>
+        </form>
+        <div class="muted small">
+          ヒント: URLに <code>?api=...</code> を付けても設定できます（例:
+          <code>?api=https%3A%2F%2Fxxxx.trycloudflare.com</code>）
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
+

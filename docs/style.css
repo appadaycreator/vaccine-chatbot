@@ -1,0 +1,234 @@
+:root {
+  color-scheme: light;
+  --bg: #0b1220;
+  --card: #0f1a33;
+  --text: #e6eefc;
+  --muted: #a6b4d0;
+  --border: rgba(255, 255, 255, 0.12);
+  --accent: #7aa2ff;
+  --accent-2: #6ee7b7;
+  --danger: #fb7185;
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  --radius: 14px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+    "Apple Color Emoji", "Segoe UI Emoji";
+  background: radial-gradient(1200px 700px at 20% 10%, rgba(122, 162, 255, 0.25), transparent),
+    radial-gradient(1000px 600px at 80% 0%, rgba(110, 231, 183, 0.18), transparent), var(--bg);
+  color: var(--text);
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.9rem;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 18px 20px 8px;
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 1.3rem;
+  letter-spacing: 0.2px;
+}
+
+.header p {
+  margin: 6px 0 0;
+}
+
+.header__links a {
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.18);
+}
+
+.main {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 10px 20px 30px;
+  display: grid;
+  gap: 14px;
+}
+
+.card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px;
+}
+
+.card h2 {
+  margin: 0 0 10px;
+  font-size: 1.05rem;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 130px 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.row--wrap {
+  grid-template-columns: repeat(2, minmax(200px, 1fr));
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+label {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+input,
+select,
+button {
+  font: inherit;
+}
+
+input,
+select {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--text);
+  outline: none;
+}
+
+input:focus,
+select:focus {
+  border-color: rgba(122, 162, 255, 0.8);
+  box-shadow: 0 0 0 4px rgba(122, 162, 255, 0.18);
+}
+
+.btn {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(122, 162, 255, 0.55);
+  color: var(--text);
+  background: rgba(122, 162, 255, 0.18);
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: rgba(122, 162, 255, 0.26);
+}
+
+.btn--secondary {
+  border-color: rgba(110, 231, 183, 0.55);
+  background: rgba(110, 231, 183, 0.14);
+}
+
+.btn--secondary:hover {
+  background: rgba(110, 231, 183, 0.22);
+}
+
+.card--chat {
+  padding-bottom: 10px;
+}
+
+.messages {
+  height: min(52vh, 520px);
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.18);
+  padding: 10px;
+}
+
+.msg {
+  display: grid;
+  gap: 6px;
+  padding: 10px 10px;
+  border-radius: 12px;
+  margin: 8px 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.msg--user {
+  background: rgba(122, 162, 255, 0.14);
+  border-color: rgba(122, 162, 255, 0.2);
+}
+
+.msg--assistant {
+  background: rgba(110, 231, 183, 0.12);
+  border-color: rgba(110, 231, 183, 0.2);
+}
+
+.msg__meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.msg__content {
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.sources {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.sources code {
+  font-size: 0.9em;
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.error {
+  color: var(--danger);
+}
+
+@media (max-width: 760px) {
+  .row {
+    grid-template-columns: 1fr;
+  }
+  .row--wrap {
+    grid-template-columns: 1fr;
+  }
+}
+

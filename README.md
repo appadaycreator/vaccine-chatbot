@@ -5,10 +5,20 @@ Ollama（ローカルLLM）とRAG（PDF検索）で、厚労省資料に基づ�
 ## 前提
 
 - macOS
-- Python 3.13（`.venv` は Python 3.13 で作成されています）
+- Python 3.13（推奨。最低でも Python 3.10 以上）
 - Ollama がインストール済み・起動済み
 
 ## セットアップ
+
+### 0) Python バージョン確認（重要）
+
+`langchain-*` や `streamlit` は **Python 3.10 以上**が必要です。まずバージョンを確認してください。
+
+```bash
+python3 --version
+```
+
+もし `Python 3.9.x` など **3.10未満**の場合は、Python 3.13 をインストールして、以降の手順で `python3.13` を使って仮想環境を作成してください。
 
 ### 1) 仮想環境（初回のみ）
 
@@ -16,10 +26,13 @@ Ollama（ローカルLLM）とRAG（PDF検索）で、厚労省資料に基づ�
 python3 -m venv .venv
 ```
 
+（複数バージョンが入っていて `python3` が 3.10 未満を指す場合は、`python3.13 -m venv .venv` のように明示してください）
+
 ### 2) 依存関係のインストール
 
 ```bash
 . .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
@@ -54,6 +67,71 @@ python app_rag.py
 streamlit run app_web.py
 ```
 
+## 使い方（API / FastAPI）
+
+### 起動
+
+```bash
+. .venv/bin/activate
+export SSL_CERT_FILE="/opt/homebrew/etc/ca-certificates/cert.pem"
+export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+## GitHub Pages（フロントエンド）で叩く
+
+`docs/` に GitHub Pages 用のシンプルなチャット画面（HTML/JS）を置いてあります。
+
+- GitHub Pages を `docs/` から配信するように設定（Settings → Pages → **Deploy from a branch** → **/docs**）
+- Pages を HTTPS で開き、API Base URL に `cloudflared` の公開URLを入力してテストします
+
+### Mac mini に cloudflared をインストール
+
+```bash
+brew install cloudflared
+```
+
+### トンネルの作成（公開URLを取得）
+
+まずAPIサーバーを起動:
+
+```bash
+. .venv/bin/activate
+export SSL_CERT_FILE="/opt/homebrew/etc/ca-certificates/cert.pem"
+export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+uvicorn api:app --host 127.0.0.1 --port 8000
+```
+
+次に別ターミナルで:
+
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+
+ログに表示される `https://xxxx.trycloudflare.com` のようなURLを、GitHub Pagesの画面で **API Base URL** に貼り付けて `/chat` が叩けるか確認してください。
+
+### エンドポイント
+
+- `GET /health`: ヘルスチェック
+- `POST /chat`: RAGで回答
+
+`POST /chat` の例:
+
+```bash
+curl -X POST "http://localhost:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"接種後7日間に記録する項目は？","model":"gemma2","k":3}'
+```
+
+### ベクトルDB（`chroma_db`）について
+
+APIサーバーは起動時に `./chroma_db` を読み込みます。未作成の場合は、既定で `vaccine_manual.pdf`（または `PDF_PATH` 環境変数で指定したPDF）から自動構築します。
+
+環境変数:
+
+- `PDF_PATH`: 取り込むPDFパス（既定: `vaccine_manual.pdf`）
+- `CHROMA_PERSIST_DIR`: Chroma永続化ディレクトリ（既定: `./chroma_db`）
+
 ### できること
 
 - **ソース（根拠）の表示**: 回答の下に「参照ページ」を表示し、抜粋を展開できます
@@ -68,4 +146,32 @@ streamlit run app_web.py
 
 `.gitignore` で `*.pdf` を除外しているため、**PDFはGitにコミットされません**。  
 手元に `vaccine_manual.pdf` を置くか、Web版ではサイドバーからPDFをアップロードして利用してください。
+
+## トラブルシューティング
+
+### `No matching distribution found for langchain-community==...` が出る
+
+多くの場合、**仮想環境を作ったPythonが3.10未満**です（例: システムの `python3` が 3.9）。
+
+- `python3 --version` を確認する
+- Python 3.10以上（例: 3.13）で作り直す:
+
+```bash
+rm -rf .venv
+python3.13 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### `SSLError(SSLCertVerificationError('OSStatus -26276'))` が出て `pip install` に失敗する
+
+macOS環境で証明書検証に失敗して PyPI に接続できないケースがあります。Homebrew の CA バンドルを明示すると改善することがあります。
+
+```bash
+. .venv/bin/activate
+export SSL_CERT_FILE="/opt/homebrew/etc/ca-certificates/cert.pem"
+export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+pip install -r requirements.txt
+```
 

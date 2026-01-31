@@ -1,6 +1,9 @@
 ollama==0.6.1
+# NOTE: `langchain-*` / `streamlit` は Python 3.10 以上が必要です（README参照）
 langchain-community==0.4.1
 langchain-text-splitters==1.1.0
 chromadb==1.4.1
 pypdf==6.6.2
 streamlit==1.53.1
+fastapi==0.117.1
+uvicorn[standard]==0.40.0
