@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vaccine.api</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/.venv/bin/python</string>
+        <string>-m</string>
+        <string>uvicorn</string>
+        <string>api:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8000</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/masayukitokunaga/workspace/vaccine-chatbot</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/api.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/api.error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+
+        <!-- 任意: PDF/DBパスを変えたい場合に使う -->
+        <key>PDF_PATH</key>
+        <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/vaccine_manual.pdf</string>
+        <key>CHROMA_PERSIST_DIR</key>
+        <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/chroma_db</string>
+    </dict>
+</dict>
+</plist>
+

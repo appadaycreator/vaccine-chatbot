@@ -110,6 +110,57 @@ cloudflared tunnel --url http://localhost:8000
 
 ログに表示される `https://xxxx.trycloudflare.com` のようなURLを、GitHub Pagesの画面で **API Base URL** に貼り付けて `/chat` が叩けるか確認してください。
 
+## 常時稼働（Mac miniを「止まらないサーバー」にする）
+
+### 0) 先に Ollama を常駐（推奨）
+
+```bash
+brew services start ollama
+```
+
+### 1) cloudflared を常時起動（named tunnel 推奨）
+
+Quick Tunnel（`cloudflared tunnel --url ...`）はURLが固定されないため、常時稼働には **named tunnel** を推奨します。
+
+Cloudflare Zero Trust のダッシュボードでトンネルを作成して **Token** を取得したら、次を実行します。
+
+```bash
+sudo cloudflared service install [YOUR_TOKEN]
+```
+
+※ `[YOUR_TOKEN]` は **秘密情報** なのでGitに入れないでください。
+
+### 2) API（uvicorn）を launchd で自動起動
+
+`launchd` により、ログイン/再起動後も `uvicorn` が自動で立ち上がり、落ちても再起動します。
+
+plistは既に作成済みです:
+
+- 実体: `~/Library/LaunchAgents/com.vaccine.api.plist`
+- テンプレ（リポジトリ内）: `launchd/com.vaccine.api.plist`
+
+反映:
+
+```bash
+launchctl load -w ~/Library/LaunchAgents/com.vaccine.api.plist
+```
+
+状態確認:
+
+```bash
+launchctl list | grep vaccine
+curl -sS http://127.0.0.1:8000/status
+```
+
+ログ確認:
+
+- `api.log`
+- `api.error.log`
+
+### 3) macOS側の設定（推奨）
+
+システム設定の「省エネルギー」で **「停電後に自動的に起動」** をオンにしておくと、不意の停電時も復帰しやすくなります。
+
 ### エンドポイント
 
 - `GET /health`: ヘルスチェック
@@ -120,7 +171,7 @@ cloudflared tunnel --url http://localhost:8000
 ```bash
 curl -X POST "http://localhost:8000/chat" \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"接種後7日間に記録する項目は？","model":"gemma2","k":3}'
+  -d '{"prompt":"接種後7日間に記録する項目は？","model":"gemma2:2b","k":2,"max_tokens":120,"timeout_s":120}'
 ```
 
 ### ベクトルDB（`chroma_db`）について
