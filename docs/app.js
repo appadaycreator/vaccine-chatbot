@@ -87,8 +87,39 @@ async function postChat({ apiBase, prompt, model, k }) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, model, k }),
+    body: JSON.stringify({ prompt, model, k, max_tokens: 120, timeout_s: 120 }),
   });
+  const bodyText = await res.text();
+  let body;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    body = { raw: bodyText };
+  }
+  if (!res.ok) {
+    const detail = body && body.detail ? body.detail : bodyText;
+    throw new Error(`HTTP ${res.status}: ${detail}`);
+  }
+  return body;
+}
+
+async function getSources(apiBase) {
+  const res = await fetch(`${apiBase}/sources`);
+  const bodyText = await res.text();
+  let body;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    body = { raw: bodyText };
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${bodyText}`);
+  return body;
+}
+
+async function uploadPdf(apiBase, file) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${apiBase}/sources/upload`, { method: "POST", body: form });
   const bodyText = await res.text();
   let body;
   try {
@@ -118,6 +149,10 @@ function main() {
   const kEl = $("k");
   const promptEl = $("prompt");
   const saveBtn = $("saveApiBase");
+  const pdfFileEl = $("pdfFile");
+  const uploadBtn = $("uploadPdf");
+  const sourcesStatusEl = $("sourcesStatus");
+  const sourcesListEl = $("sourcesList");
 
   apiBaseEl.value = loadApiBase();
   // M2 Mac mini (8GB) では軽量モデルをデフォルトにする
@@ -128,6 +163,52 @@ function main() {
     const v = normalizeApiBase(apiBaseEl.value);
     saveApiBase(v);
     setStatus(`保存しました: ${v}`);
+  });
+
+  async function refreshSources() {
+    const apiBase = normalizeApiBase(apiBaseEl.value);
+    if (!apiBase) return;
+    try {
+      const data = await getSources(apiBase);
+      if (!data.ok) {
+        sourcesStatusEl.textContent = `ソース一覧取得に失敗: ${data.error || ""}`;
+        sourcesListEl.textContent = "";
+        return;
+      }
+      sourcesStatusEl.textContent = `登録済みソース: ${data.items.length} 件`;
+      sourcesListEl.innerHTML = data.items
+        .map((it) => `<code>${escapeHtml(it.filename || it.path || "")}</code>`)
+        .join(" ");
+    } catch (e) {
+      sourcesStatusEl.textContent = `ソース一覧取得に失敗: ${e && e.message ? e.message : String(e)}`;
+      sourcesListEl.textContent = "";
+    }
+  }
+
+  uploadBtn.addEventListener("click", async () => {
+    const apiBase = normalizeApiBase(apiBaseEl.value);
+    if (!apiBase) {
+      setStatus("API Base URL を入力してください。", true);
+      return;
+    }
+    const f = pdfFileEl.files && pdfFileEl.files[0] ? pdfFileEl.files[0] : null;
+    if (!f) {
+      setStatus("アップロードするPDFを選択してください。", true);
+      return;
+    }
+    if (f.type && f.type !== "application/pdf") {
+      setStatus("PDFファイルを選択してください。", true);
+      return;
+    }
+    setStatus(`PDFをアップロード中…（${f.name}）`);
+    try {
+      await uploadPdf(apiBase, f);
+      setStatus(`アップロード完了: ${f.name}`);
+      pdfFileEl.value = "";
+      await refreshSources();
+    } catch (e) {
+      setStatus(`アップロード失敗: ${e && e.message ? e.message : String(e)}`, true);
+    }
   });
 
   $("chatForm").addEventListener("submit", async (e) => {
@@ -159,6 +240,8 @@ function main() {
     "assistant",
     "API Base URL を設定して、質問を送ってください。\n（cloudflaredのURLを貼ればGitHub Pagesからでも叩けます）"
   );
+
+  refreshSources();
 }
 
 main();

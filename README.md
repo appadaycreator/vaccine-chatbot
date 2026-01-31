@@ -110,6 +110,17 @@ cloudflared tunnel --url http://localhost:8000
 
 ログに表示される `https://xxxx.trycloudflare.com` のようなURLを、GitHub Pagesの画面で **API Base URL** に貼り付けて `/chat` が叩けるか確認してください。
 
+### GitHub Pagesからソース（PDF）を追加する
+
+GitHub Pagesの画面にある **「ソース追加（PDFアップロード）」** からPDFをアップロードできます。アップロードされたPDFは **Mac mini側に保存**され、RAGの検索対象に追加されます。
+
+- API: `POST /sources/upload`（multipart）
+- 一覧: `GET /sources`
+
+保存先（既定）:
+
+- `./uploads`（環境変数 `UPLOAD_DIR` で変更可能）
+
 ## 常時稼働（Mac miniを「止まらないサーバー」にする）
 
 ### 0) 先に Ollama を常駐（推奨）

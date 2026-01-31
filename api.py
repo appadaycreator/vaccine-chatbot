@@ -1,9 +1,11 @@
 import asyncio
 import os
+import re
+import hashlib
 from typing import Any
 
 import ollama
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import OllamaEmbeddings
@@ -15,8 +17,10 @@ from pydantic import BaseModel, Field
 DEFAULT_PDF_PATH = "vaccine_manual.pdf"
 DEFAULT_PERSIST_DIR = "./chroma_db"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
+DEFAULT_UPLOAD_DIR = "./uploads"
 MAX_CONTEXT_CHARS = 5000
 MAX_DOC_CHARS = 1400
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024  # 30MB
 
 
 app = FastAPI(title="vaccine-chatbot API", version="0.1.0")
@@ -95,6 +99,46 @@ def _build_vectorstore_from_pdf(pdf_path: str, persist_dir: str) -> Chroma:
     return vs
 
 
+def _sanitize_filename(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        return "uploaded.pdf"
+    name = name.replace("\\", "/").split("/")[-1]
+    name = re.sub(r"[^0-9A-Za-z._ -]", "_", name)
+    if not name.lower().endswith(".pdf"):
+        name += ".pdf"
+    return name
+
+
+def _persist_if_supported(vs: Chroma) -> None:
+    persist = getattr(vs, "persist", None)
+    if callable(persist):
+        persist()
+
+
+def _split_pdf_docs(pdf_path: str, source_label: str):
+    loader = PyPDFLoader(pdf_path)
+    docs = loader.load()
+    for d in docs:
+        d.metadata = dict(d.metadata or {})
+        d.metadata["source"] = source_label
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    return splitter.split_documents(docs)
+
+
+def _create_vectorstore_from_chunks(chunks, persist_dir: str) -> Chroma:
+    embeddings = OllamaEmbeddings(model=DEFAULT_EMBED_MODEL)
+    vs = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=persist_dir)
+    _persist_if_supported(vs)
+    return vs
+
+
+def _add_chunks_to_vectorstore(vs: Chroma, chunks) -> None:
+    # Chromaは add_documents を持つ（langchain版により引数は変わらない想定）
+    vs.add_documents(chunks)
+    _persist_if_supported(vs)
+
+
 def _load_vectorstore(persist_dir: str) -> Chroma:
     embeddings = OllamaEmbeddings(model=DEFAULT_EMBED_MODEL)
     return Chroma(persist_directory=persist_dir, embedding_function=embeddings)
@@ -120,12 +164,22 @@ def _startup() -> None:
     """
     persist_dir = os.environ.get("CHROMA_PERSIST_DIR", DEFAULT_PERSIST_DIR)
     pdf_path = os.environ.get("PDF_PATH", DEFAULT_PDF_PATH)
+    upload_dir = os.environ.get("UPLOAD_DIR", DEFAULT_UPLOAD_DIR)
 
     # 起動失敗で落とすのではなく、/status と /chat で理由を返せるようにする
     app.state.vectorstore = None
     app.state.init_error = None
     app.state.persist_dir = persist_dir
     app.state.pdf_path = pdf_path
+    app.state.upload_dir = upload_dir
+    app.state.ingest_lock = asyncio.Lock()
+
+    try:
+        os.makedirs(upload_dir, exist_ok=True)
+        os.makedirs(persist_dir, exist_ok=True)
+    except Exception:
+        # ここは致命的ではない（/statusに出す）
+        pass
 
     try:
         vs = _load_vectorstore(persist_dir)
@@ -133,14 +187,33 @@ def _startup() -> None:
             app.state.vectorstore = vs
             return
 
-        if not os.path.exists(pdf_path):
+        # DB未作成の場合は、既定PDF or uploads内PDFから構築
+        upload_pdfs = []
+        try:
+            upload_pdfs = [
+                os.path.join(upload_dir, f)
+                for f in os.listdir(upload_dir)
+                if f.lower().endswith(".pdf")
+            ]
+        except Exception:
+            upload_pdfs = []
+
+        chunks = []
+        if os.path.exists(pdf_path):
+            chunks.extend(_split_pdf_docs(pdf_path, os.path.basename(pdf_path)))
+        for p in sorted(upload_pdfs):
+            chunks.extend(_split_pdf_docs(p, os.path.basename(p)))
+
+        if not chunks:
             app.state.init_error = (
-                f"ベクトルDBが未作成で、PDFも見つかりませんでした: {pdf_path}\n"
-                f"PDFを配置するか、環境変数 PDF_PATH を指定してください。"
+                f"ベクトルDBが未作成で、PDFも見つかりませんでした。\n"
+                f"- 既定PDF: {pdf_path}\n"
+                f"- 追加PDF: {upload_dir}/*.pdf\n"
+                f"PDFを配置するか、環境変数 PDF_PATH / UPLOAD_DIR を指定してください。"
             )
             return
 
-        app.state.vectorstore = _build_vectorstore_from_pdf(pdf_path, persist_dir)
+        app.state.vectorstore = _create_vectorstore_from_chunks(chunks, persist_dir)
     except Exception as e:
         app.state.init_error = str(e)
 
@@ -157,8 +230,65 @@ def status() -> dict[str, Any]:
         "ready": app.state.vectorstore is not None,
         "persist_dir": getattr(app.state, "persist_dir", DEFAULT_PERSIST_DIR),
         "pdf_path": getattr(app.state, "pdf_path", DEFAULT_PDF_PATH),
+        "upload_dir": getattr(app.state, "upload_dir", DEFAULT_UPLOAD_DIR),
         "init_error": getattr(app.state, "init_error", None),
     }
+
+
+@app.get("/sources")
+def list_sources() -> dict[str, Any]:
+    pdf_path = getattr(app.state, "pdf_path", DEFAULT_PDF_PATH)
+    upload_dir = getattr(app.state, "upload_dir", DEFAULT_UPLOAD_DIR)
+
+    items: list[dict[str, Any]] = []
+    if os.path.exists(pdf_path):
+        items.append({"type": "base", "filename": os.path.basename(pdf_path), "path": pdf_path})
+    try:
+        for f in sorted(os.listdir(upload_dir)):
+            if f.lower().endswith(".pdf"):
+                items.append({"type": "upload", "filename": f, "path": os.path.join(upload_dir, f)})
+    except Exception as e:
+        return {"ok": False, "error": str(e), "items": items}
+    return {"ok": True, "items": items}
+
+
+@app.post("/sources/upload")
+async def upload_source(file: UploadFile = File(...)):
+    upload_dir = getattr(app.state, "upload_dir", DEFAULT_UPLOAD_DIR)
+    persist_dir = getattr(app.state, "persist_dir", DEFAULT_PERSIST_DIR)
+
+    if file.content_type not in (None, "", "application/pdf"):
+        raise HTTPException(status_code=400, detail="PDFのみ対応です（content-type: application/pdf）")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="ファイルが空です")
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"ファイルが大きすぎます（最大 {MAX_UPLOAD_BYTES} bytes）")
+
+    safe_name = _sanitize_filename(file.filename or "uploaded.pdf")
+    digest = hashlib.sha256(raw).hexdigest()[:16]
+    save_name = f"{digest}_{safe_name}"
+    os.makedirs(upload_dir, exist_ok=True)
+    save_path = os.path.join(upload_dir, save_name)
+    if not os.path.exists(save_path):
+        with open(save_path, "wb") as f:
+            f.write(raw)
+
+    # 取り込み（排他）
+    lock: asyncio.Lock = app.state.ingest_lock
+    async with lock:
+        vs = app.state.vectorstore
+        try:
+            chunks = await asyncio.to_thread(_split_pdf_docs, save_path, save_name)
+            if vs is None:
+                app.state.vectorstore = await asyncio.to_thread(_create_vectorstore_from_chunks, chunks, persist_dir)
+            else:
+                await asyncio.to_thread(_add_chunks_to_vectorstore, vs, chunks)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True, "filename": save_name}
 
 
 @app.post("/chat")

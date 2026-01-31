@@ -7,3 +7,4 @@ pypdf==6.6.2
 streamlit==1.53.1
 fastapi==0.117.1
 uvicorn[standard]==0.40.0
+python-multipart==0.0.20

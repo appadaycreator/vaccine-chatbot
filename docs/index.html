@@ -56,6 +56,20 @@
         </div>
       </section>
 
+      <section class="card">
+        <h2>ソース追加（PDFアップロード）</h2>
+        <p class="muted">
+          ここでアップロードしたPDFは、Mac mini側に保存され、RAGの検索対象に追加されます（GitHub Pages側には保存されません）。
+        </p>
+        <div class="row">
+          <label for="pdfFile">PDF</label>
+          <input id="pdfFile" type="file" accept="application/pdf" />
+          <button id="uploadPdf" class="btn btn--secondary" type="button">アップロード</button>
+        </div>
+        <div class="muted small" id="sourcesStatus"></div>
+        <div class="muted small" id="sourcesList"></div>
+      </section>
+
       <section class="card card--chat">
         <h2>チャット</h2>
         <div id="messages" class="messages" aria-live="polite"></div>
