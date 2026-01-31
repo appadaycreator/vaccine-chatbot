@@ -176,9 +176,27 @@ function main() {
         return;
       }
       sourcesStatusEl.textContent = `登録済みソース: ${data.items.length} 件`;
-      sourcesListEl.innerHTML = data.items
-        .map((it) => `<code>${escapeHtml(it.filename || it.path || "")}</code>`)
-        .join(" ");
+      if (!data.items.length) {
+        sourcesListEl.innerHTML = `<div class="muted small">（まだ登録されていません）</div>`;
+        return;
+      }
+      const rows = data.items
+        .map((it) => {
+          const type = it && it.type ? String(it.type) : "";
+          const original = it && it.original_filename ? String(it.original_filename) : "";
+          const saved = it && it.filename ? String(it.filename) : "";
+          const label = original || saved || (it && it.path ? String(it.path) : "");
+          const showSaved = type === "upload" && saved && original && saved !== original;
+          const meta = [];
+          if (showSaved) meta.push(`保存名: ${saved}`);
+          if (it && typeof it.size_bytes === "number") meta.push(`${Math.round(it.size_bytes / 1024)}KB`);
+          const metaHtml = meta.length
+            ? `<span class="muted small source-meta">（${escapeHtml(meta.join(" / "))}）</span>`
+            : "";
+          return `<li class="source-item"><code>${escapeHtml(label)}</code>${metaHtml}</li>`;
+        })
+        .join("");
+      sourcesListEl.innerHTML = `<ul class="sources-list">${rows}</ul>`;
     } catch (e) {
       sourcesStatusEl.textContent = `ソース一覧取得に失敗: ${e && e.message ? e.message : String(e)}`;
       sourcesListEl.textContent = "";

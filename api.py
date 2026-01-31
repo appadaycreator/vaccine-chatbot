@@ -2,6 +2,8 @@ import asyncio
 import os
 import re
 import hashlib
+import json
+from datetime import datetime, timezone
 from typing import Any
 
 import ollama
@@ -21,6 +23,7 @@ DEFAULT_UPLOAD_DIR = "./uploads"
 MAX_CONTEXT_CHARS = 5000
 MAX_DOC_CHARS = 1400
 MAX_UPLOAD_BYTES = 30 * 1024 * 1024  # 30MB
+UPLOAD_MANIFEST_NAME = "_manifest.json"
 
 
 app = FastAPI(title="vaccine-chatbot API", version="0.1.0")
@@ -108,6 +111,42 @@ def _sanitize_filename(name: str) -> str:
     if not name.lower().endswith(".pdf"):
         name += ".pdf"
     return name
+
+
+def _manifest_path(upload_dir: str) -> str:
+    return os.path.join(upload_dir, UPLOAD_MANIFEST_NAME)
+
+
+def _load_manifest(upload_dir: str) -> dict[str, Any]:
+    path = _manifest_path(upload_dir)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        # 破損などがあっても、API全体は落とさない
+        return {}
+
+
+def _save_manifest(upload_dir: str, data: dict[str, Any]) -> None:
+    path = _manifest_path(upload_dir)
+    tmp = path + ".tmp"
+    os.makedirs(upload_dir, exist_ok=True)
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def _infer_original_from_saved_name(filename: str) -> str:
+    # 例: "0123abcd..._original-name.pdf" -> "original-name.pdf"
+    if not filename:
+        return filename
+    parts = filename.split("_", 1)
+    if len(parts) == 2 and len(parts[0]) >= 8:
+        return parts[1]
+    return filename
 
 
 def _persist_if_supported(vs: Chroma) -> None:
@@ -240,13 +279,57 @@ def list_sources() -> dict[str, Any]:
     pdf_path = getattr(app.state, "pdf_path", DEFAULT_PDF_PATH)
     upload_dir = getattr(app.state, "upload_dir", DEFAULT_UPLOAD_DIR)
 
+    manifest = _load_manifest(upload_dir)
     items: list[dict[str, Any]] = []
     if os.path.exists(pdf_path):
-        items.append({"type": "base", "filename": os.path.basename(pdf_path), "path": pdf_path})
+        base_name = os.path.basename(pdf_path)
+        try:
+            st = os.stat(pdf_path)
+            size_bytes = int(st.st_size)
+            mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+        except Exception:
+            size_bytes = None
+            mtime = None
+        items.append(
+            {
+                "type": "base",
+                "filename": base_name,
+                "original_filename": base_name,
+                "path": pdf_path,
+                "size_bytes": size_bytes,
+                "mtime": mtime,
+            }
+        )
     try:
         for f in sorted(os.listdir(upload_dir)):
-            if f.lower().endswith(".pdf"):
-                items.append({"type": "upload", "filename": f, "path": os.path.join(upload_dir, f)})
+            if f == UPLOAD_MANIFEST_NAME:
+                continue
+            if not f.lower().endswith(".pdf"):
+                continue
+            path = os.path.join(upload_dir, f)
+            entry = manifest.get(f, {}) if isinstance(manifest, dict) else {}
+            original = None
+            if isinstance(entry, dict):
+                original = entry.get("original_filename") or entry.get("original") or None
+            if not original:
+                original = _infer_original_from_saved_name(f)
+            try:
+                st = os.stat(path)
+                size_bytes = int(st.st_size)
+                mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+            except Exception:
+                size_bytes = None
+                mtime = None
+            items.append(
+                {
+                    "type": "upload",
+                    "filename": f,  # 保存名（ハッシュ付き）
+                    "original_filename": original,  # 元ファイル名（表示用）
+                    "path": path,
+                    "size_bytes": size_bytes,
+                    "mtime": mtime,
+                }
+            )
     except Exception as e:
         return {"ok": False, "error": str(e), "items": items}
     return {"ok": True, "items": items}
@@ -266,7 +349,9 @@ async def upload_source(file: UploadFile = File(...)):
     if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"ファイルが大きすぎます（最大 {MAX_UPLOAD_BYTES} bytes）")
 
-    safe_name = _sanitize_filename(file.filename or "uploaded.pdf")
+    # 表示用の元ファイル名（ユーザーが選んだ名前）
+    original_name = (file.filename or "").strip()
+    safe_name = _sanitize_filename(original_name or "uploaded.pdf")
     digest = hashlib.sha256(raw).hexdigest()[:16]
     save_name = f"{digest}_{safe_name}"
     os.makedirs(upload_dir, exist_ok=True)
@@ -278,6 +363,23 @@ async def upload_source(file: UploadFile = File(...)):
     # 取り込み（排他）
     lock: asyncio.Lock = app.state.ingest_lock
     async with lock:
+        # 元ファイル名をmanifestに保存（フロント表示用）
+        try:
+            manifest = _load_manifest(upload_dir)
+            if not isinstance(manifest, dict):
+                manifest = {}
+            manifest[save_name] = {
+                "original_filename": original_name or safe_name,
+                "saved_filename": save_name,
+                "sha256_16": digest,
+                "size_bytes": len(raw),
+                "uploaded_at": datetime.now(tz=timezone.utc).isoformat(),
+            }
+            _save_manifest(upload_dir, manifest)
+        except Exception:
+            # ここで失敗してもRAG取り込み自体は継続
+            pass
+
         vs = app.state.vectorstore
         try:
             chunks = await asyncio.to_thread(_split_pdf_docs, save_path, save_name)
@@ -288,7 +390,7 @@ async def upload_source(file: UploadFile = File(...)):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    return {"ok": True, "filename": save_name}
+    return {"ok": True, "filename": save_name, "original_filename": original_name or safe_name}
 
 
 @app.post("/chat")

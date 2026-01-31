@@ -117,6 +117,8 @@ GitHub Pagesの画面にある **「ソース追加（PDFアップロード）�
 - API: `POST /sources/upload`（multipart）
 - 一覧: `GET /sources`
 
+`GET /sources` は **「元のファイル名（資料名）」** を優先して返します（保存時は重複排除のため `sha256_元ファイル名.pdf` のような保存名になります）。
+
 保存先（既定）:
 
 - `./uploads`（環境変数 `UPLOAD_DIR` で変更可能）

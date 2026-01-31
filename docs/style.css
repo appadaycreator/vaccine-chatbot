@@ -212,6 +212,21 @@ select:focus {
   font-size: 0.9em;
 }
 
+.sources-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.source-item code {
+  word-break: break-word;
+}
+
+.source-meta {
+  margin-left: 6px;
+}
+
 .composer {
   display: grid;
   grid-template-columns: 1fr auto;
