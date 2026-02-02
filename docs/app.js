@@ -1586,6 +1586,33 @@ function main() {
       const sources = chatRes && Array.isArray(chatRes.sources) ? chatRes.sources : null;
       const noSources = Array.isArray(sources) && sources.length === 0;
       const ans = (chatRes && chatRes.answer) || "";
+
+      // 回答本文は「普通の会話文」にしつつ、元ソース（資料の抜粋）を会話内にそのまま表示する。
+      // - 参照箇所は API の sources[].excerpt を使用（PDFから抽出したテキスト）
+      // - クリック展開しなくても見えるよう、回答の直下に Markdown で差し込む
+      const quoteMd = (() => {
+        const arr = Array.isArray(sources) ? sources : [];
+        const items = arr
+          .map((s) => {
+            const loc = sourceLocationLabel(s);
+            const ex = normalizeExcerpt(s);
+            if (!ex) return null;
+            const q = ex
+              .split("\n")
+              .map((ln) => ln.trim())
+              .filter(Boolean)
+              .map((ln) => `> ${ln}`)
+              .join("\n");
+            // Markdownレンダラ側でHTMLはサニタイズしているが、locは念のためテキストとして扱う
+            return `- **${loc}**\n\n${q}`;
+          })
+          .filter(Boolean);
+        if (!items.length) return "";
+        // 見出しを付けて分かりやすくする（固定フォーマットではなく、単なる付随情報として表示）
+        return `\n\n---\n\n**引用（資料の抜粋）**\n\n${items.join("\n\n")}`;
+      })();
+
+      const ansWithQuotes = `${String(ans || "").trim()}${quoteMd}`.trim();
       const looksLikeRefusal = noSources && /資料に記載がないため、この資料に基づく回答はできません/.test(String(ans));
       const actions = looksLikeRefusal
         ? buildRewriteSuggestions(p).map((text) => ({
@@ -1597,7 +1624,7 @@ function main() {
             },
           }))
         : [];
-      addMessage("assistant", ans, {
+      addMessage("assistant", ansWithQuotes, {
         model,
         sources,
         timings,
