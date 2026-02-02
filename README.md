@@ -131,7 +131,7 @@ curl -sS http://127.0.0.1:8000/status | python -m json.tool
 画面上部の **「環境チェック」** で、Ollama未起動・モデル未DLなどの“動かない原因”を確認できます。
 
 - GitHub Pages を `docs/` から配信するように設定（Settings → Pages → **Deploy from a branch** → **/docs**）
-- Pages を HTTPS で開き、API Base URL に `cloudflared` の公開URLを入力してテストします
+- Pages を HTTPS で開き、API Base URL に `cloudflared` の公開URLを入力してテストします（初期値は空です）
 
 ### 静的チャットUI（docs/）の操作（最低限のUX）
 
@@ -180,9 +180,11 @@ cloudflared tunnel --url http://localhost:8000
 
 ブラウザからのPDFアップロードは使わず、**Mac mini 側でPDFを配置して参照**します。
 
-- 既定の配置先: `./pdfs/`（環境変数 `PDF_DIR` で変更可能）
-- 既定の単体PDF: `vaccine_manual.pdf`（環境変数 `PDF_PATH` で変更可能）
-  - 互換: `./uploads/` に置かれたPDFも参照対象に含めます（旧構成の名残で、アップロード機能ではありません）
+- **正（唯一の置き場所）**: `PDF_DIR`（既定: `./pdfs/`）
+- **任意（補助）**: `PDF_PATH`（既定: `vaccine_manual.pdf`）を指定すると、その単体PDFも参照対象に含めます
+- **旧互換（非推奨 / 既定で無効）**: どうしても旧構成を参照したい場合のみ、`ENABLE_LEGACY_UPLOADS=1` と `LEGACY_PDF_DIR` を設定してください  
+  - 例: `ENABLE_LEGACY_UPLOADS=1 LEGACY_PDF_DIR=./uploads`
+  - これは**アップロード機能ではありません**（管理UI/保存期限/サイズ制限/認証は提供しません）
 
 配置後の反映:
 
@@ -248,6 +250,13 @@ curl -sS http://127.0.0.1:8000/status
 起動直後に `api.log` へ、起動設定（`PDF_DIR` / `CHROMA_PERSIST_DIR` 等）と `git_sha` / `started_at` が1行JSONで出ます。  
 **「修正したのに挙動が変わらない」** と感じたら、まず `/status` の `git_sha` が想定どおりか確認してください。
 
+#### 実働コード（ブランチ/コミット）を固定する運用
+
+- 本番の実働は **launchd が `uvicorn api:app` をこのリポジトリの作業ディレクトリで起動**します（テンプレ: `launchd/com.vaccine.api.plist`）。
+- コード更新（`git pull` 等）をしたら、**プロセスを再起動しない限り動作は変わりません**。
+  - 目視の唯一の正: `GET /status` の `git_sha` / `started_at`
+  - 反映: `launchctl kickstart -k gui/$UID/com.vaccine.api`（または unload/load）
+
 #### request_id と工程時間（障害切り分け）
 
 “遅い/落ちた/答えない” を短時間で原因特定できるよう、APIは次をログ化します（横展開: **API**）。
@@ -275,7 +284,7 @@ curl -sS http://127.0.0.1:8000/status
 
 - `GET /health`: ヘルスチェック
 - `GET /status`: 状態確認（PDF数、初期化エラー、timings、embeddingウォームアップ/キャッシュなど）
-- `GET /diagnostics`: 環境チェック（Ollama疎通、モデル一覧、embedding可否。UIの「環境チェック」で表示）
+- `GET /diagnostics`: 環境チェック（Ollama疎通/応答時間、モデル有無、embedding/生成のスモークテスト。UIの「環境チェック」で表示）
 - `GET /sources`: 参照PDF一覧＋インデックス状態（実行中/最終成功/エラー/次にやること）
 - `POST /reload`: 再インデックス開始（非同期。実行中は409で多重実行防止）
 - `POST /search`: 検索（embedding → 類似検索）
@@ -343,6 +352,7 @@ GitHub Pages の画面にある **「環境チェック」**（APIの `GET /diag
 - **Ollama疎通**: Ollama が起動していない/到達できない
 - **生成モデルの有無**: 選択中モデルが未インストール（例: `ollama pull gemma2:2b`）
 - **Embeddingモデルの有無/動作**: `nomic-embed-text` が未インストール、または embedding が失敗している（RAGが動かない）
+- **生成の動作**: 生成がタイムアウト/失敗している（初回起動・高負荷・モデル不備など）
 
 コマンド例:
 

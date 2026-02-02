@@ -64,7 +64,16 @@ function loadApiBase() {
   const fromQuery = parseApiFromQuery();
   if (fromQuery) return normalizeApiBase(fromQuery);
   const fromStorage = localStorage.getItem("apiBase") || "";
-  return normalizeApiBase(fromStorage) || "http://localhost:8000";
+  const normalized = normalizeApiBase(fromStorage);
+  if (normalized) return normalized;
+
+  // GitHub Pages（HTTPS）上で http://localhost:8000 を初期値にすると Mixed Content で失敗し、
+  // コンソールが汚れるため、HTTPSのときは空にしてユーザー入力に委ねる。
+  const host = (typeof window !== "undefined" && window.location && window.location.hostname) || "";
+  const protocol = (typeof window !== "undefined" && window.location && window.location.protocol) || "";
+  const isLocalHost = host === "localhost" || host === "127.0.0.1";
+  if (protocol === "https:" && !isLocalHost) return "";
+  return "http://localhost:8000";
 }
 
 function renderMarkdown(md) {
@@ -398,6 +407,11 @@ function main() {
   const diagErrorEl = $("diagError");
   const diagListEl = $("diagList");
 
+  // /diagnostics が未実装のAPI（またはAPI以外）を指すと 404 が定期的に出るため、
+  // 一度 404 を検出したらポーリングを止め、ユーザーが API Base URL を見直せるようにする。
+  let diagPollId = null;
+  let diagUnsupportedFor = null;
+
   apiBaseEl.value = loadApiBase();
   // M2 Mac mini (8GB) では軽量モデルをデフォルトにする
   if (modelEl && !modelEl.value) {
@@ -406,9 +420,14 @@ function main() {
   saveBtn.addEventListener("click", () => {
     const v = normalizeApiBase(apiBaseEl.value);
     saveApiBase(v);
+    diagUnsupportedFor = null;
     setStatus(`保存しました: ${v}`);
     refreshSources();
     refreshDiagnostics();
+    // 404 でポーリング停止していた場合に備えて復帰させる
+    if (!diagPollId) {
+      diagPollId = setInterval(() => refreshDiagnostics(), 30000);
+    }
   });
 
   modelEl.addEventListener("change", () => {
@@ -524,6 +543,7 @@ function main() {
     const apiBase = normalizeApiBase(apiBaseEl.value);
     const model = (modelEl && modelEl.value ? String(modelEl.value) : "gemma2:2b").trim() || "gemma2:2b";
     if (!apiBase) return null;
+    if (diagUnsupportedFor === apiBase) return null;
     try {
       const data = await getDiagnostics(apiBase, model);
       if (!data || data.ok !== true) {
@@ -586,7 +606,28 @@ function main() {
       diagOverallEl.textContent = "未確認";
       diagSummaryEl.textContent = "";
       if (status === 404) {
-        diagErrorEl.textContent = "このAPIは /diagnostics に未対応です。";
+        // 通常運用の導線: URLが FastAPI 以外（例: Streamlit / 静的ホスティング等）を指しているケースが多い
+        // “未対応”ではなく、ユーザーが最短で復旧できるように「何を直すか」を表示する
+        const lines = [
+          "環境チェック（/diagnostics）が見つかりませんでした（HTTP 404）。",
+          "",
+          "まず確認すること:",
+          "- API Base URL が FastAPI（uvicorn）を指しているか",
+          "- そのURLで /health と /status が開けるか",
+          "",
+          "よくある原因:",
+          "- cloudflared のURLが別サービス（例: Streamlit）に向いている",
+          "- ポート番号/転送先が違う",
+          "",
+          "対処:",
+          "- API Base URL を正しいURLに貼り替えて「保存」を押してください",
+        ];
+        diagErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
+        diagUnsupportedFor = apiBase;
+        if (diagPollId) {
+          clearInterval(diagPollId);
+          diagPollId = null;
+        }
       } else {
         diagErrorEl.textContent = `環境チェックの取得に失敗: ${summarizeApiError(e)}`;
       }
@@ -922,7 +963,7 @@ function main() {
   refreshSources();
   refreshDiagnostics();
   // “動かない原因”がすぐ見えるように、軽くポーリング（失敗しても送信はブロックしない）
-  setInterval(() => refreshDiagnostics(), 30000);
+  diagPollId = setInterval(() => refreshDiagnostics(), 30000);
   updateComposerState();
 }
 

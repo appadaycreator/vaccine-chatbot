@@ -1,0 +1,26 @@
+{
+  "index_status": {
+    "finished_at": "2026-02-02T06:08:51.809516+00:00",
+    "last_error": {
+      "at": "2026-02-02T06:08:51.809538+00:00",
+      "code": "INDEX_BUILD_FAILED",
+      "hints": [
+        "PDFを ./pdfs/（環境変数 PDF_DIR）に配置してください",
+        "スキャンPDFの場合はOCRしてから配置してください",
+        "PDFを追加・更新したら POST /reload で再インデックスしてください"
+      ],
+      "message": "安全のため persist_dir の自動削除は chroma_db のみに限定しています: ./chroma_db_8001",
+      "report": null
+    },
+    "last_report": null,
+    "last_success_at": null,
+    "run_id": 1770012530857,
+    "running": false,
+    "started_at": "2026-02-02T06:08:50.857427+00:00",
+    "trigger": "startup"
+  },
+  "last_indexed_at": null,
+  "pdf_dir": "./pdfs",
+  "pdf_path": "vaccine_manual.pdf",
+  "source_signature": null
+}
