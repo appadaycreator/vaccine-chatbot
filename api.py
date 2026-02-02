@@ -1,7 +1,9 @@
 import asyncio
 import json
 import os
+import platform
 import shutil
+import subprocess
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -29,6 +31,9 @@ DEFAULT_EMBEDDING_TIMEOUT_S = 180
 DEFAULT_SEARCH_TIMEOUT_S = 60
 DEFAULT_GENERATE_TIMEOUT_S = 180
 DEFAULT_CACHE_MAX_ENTRIES = 512
+
+
+APP_STARTED_AT = datetime.now(tz=timezone.utc).isoformat()
 
 
 app = FastAPI(title="vaccine-chatbot API", version="0.2.0")
@@ -112,6 +117,75 @@ class _LRUCache:
             "hits": self.hits,
             "misses": self.misses,
         }
+
+
+def _repo_root() -> str:
+    # launchd の WorkingDirectory を信頼しつつ、スクリプト配置も基準にできるようにする
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _read_text(path: str) -> str | None:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def _try_git_rev_parse(repo_root: str) -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+        )
+        sha = out.decode("utf-8", errors="ignore").strip()
+        return sha or None
+    except Exception:
+        return None
+
+
+def _try_read_git_dir(repo_root: str) -> str | None:
+    git_dir = os.path.join(repo_root, ".git")
+    head = _read_text(os.path.join(git_dir, "HEAD"))
+    if not head:
+        return None
+    head = head.strip()
+
+    # detached HEAD
+    if not head.startswith("ref:"):
+        return head if len(head) >= 7 else None
+
+    # ref: refs/heads/main
+    ref = head.split(":", 1)[1].strip()
+    ref_path = os.path.join(git_dir, ref)
+    sha = _read_text(ref_path)
+    if sha:
+        sha = sha.strip()
+        return sha or None
+
+    # packed-refs fallback
+    packed = _read_text(os.path.join(git_dir, "packed-refs"))
+    if not packed:
+        return None
+    for line in packed.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("^"):
+            continue
+        parts = line.split(" ")
+        if len(parts) == 2 and parts[1] == ref:
+            return parts[0]
+    return None
+
+
+def _get_git_sha(repo_root: str) -> str:
+    # デプロイ時に .git を含めない場合は、環境変数で注入できるようにする
+    for k in ("GIT_SHA", "GIT_COMMIT", "SOURCE_VERSION"):
+        v = os.environ.get(k)
+        if v and v.strip():
+            return v.strip()
+    return _try_git_rev_parse(repo_root) or _try_read_git_dir(repo_root) or "unknown"
 
 
 def _format_context(docs) -> str:
@@ -325,12 +399,18 @@ async def _startup() -> None:
     persist_dir = os.environ.get("CHROMA_PERSIST_DIR", DEFAULT_PERSIST_DIR)
     pdf_path = os.environ.get("PDF_PATH", DEFAULT_PDF_PATH)
     pdf_dir = os.environ.get("PDF_DIR", DEFAULT_PDF_DIR)
+    run_mode = os.environ.get("RUN_MODE", "prod").strip() or "prod"
+    git_sha = _get_git_sha(_repo_root())
 
     app.state.vectorstore = None
     app.state.init_error = None
     app.state.persist_dir = persist_dir
     app.state.pdf_path = pdf_path
     app.state.pdf_dir = pdf_dir
+    app.state.started_at = APP_STARTED_AT
+    app.state.version = getattr(app, "version", None)
+    app.state.git_sha = git_sha
+    app.state.run_mode = run_mode
     app.state.ingest_lock = asyncio.Lock()
     app.state.source_signature = None
     app.state.last_indexed_at = None
@@ -376,6 +456,32 @@ async def _startup() -> None:
 
     asyncio.create_task(_warmup_embed())
 
+    # launchd の StandardOutPath に落ちる想定（起動時の設定・バージョンを必ず残す）
+    try:
+        print(
+            json.dumps(
+                {
+                    "ts": datetime.now(tz=timezone.utc).isoformat(),
+                    "event": "startup",
+                    "version": getattr(app.state, "version", None),
+                    "git_sha": getattr(app.state, "git_sha", None),
+                    "started_at": getattr(app.state, "started_at", None),
+                    "run_mode": getattr(app.state, "run_mode", None),
+                    "pdf_path": pdf_path,
+                    "pdf_dir": pdf_dir,
+                    "legacy_pdf_dir": LEGACY_PDF_DIR,
+                    "persist_dir": persist_dir,
+                    "embed_model": DEFAULT_EMBED_MODEL,
+                    "embed_cache_max": int(os.environ.get("EMBED_CACHE_MAX", str(DEFAULT_CACHE_MAX_ENTRIES))),
+                    "python": platform.python_version(),
+                    "cwd": os.getcwd(),
+                },
+                ensure_ascii=False,
+            )
+        )
+    except Exception:
+        pass
+
 
 @app.get("/health")
 def health() -> dict[str, str | bool]:
@@ -386,6 +492,10 @@ def health() -> dict[str, str | bool]:
 def status() -> dict[str, Any]:
     pdfs = _list_pdf_paths(getattr(app.state, "pdf_path", DEFAULT_PDF_PATH), getattr(app.state, "pdf_dir", DEFAULT_PDF_DIR))
     return {
+        "version": getattr(app.state, "version", None),
+        "git_sha": getattr(app.state, "git_sha", None),
+        "started_at": getattr(app.state, "started_at", None),
+        "run_mode": getattr(app.state, "run_mode", None),
         "ready": app.state.vectorstore is not None,
         "persist_dir": getattr(app.state, "persist_dir", DEFAULT_PERSIST_DIR),
         "pdf_path": getattr(app.state, "pdf_path", DEFAULT_PDF_PATH),

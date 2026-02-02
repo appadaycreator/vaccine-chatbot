@@ -78,6 +78,31 @@ export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
 uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
+### 開発（コード変更を即時反映したい場合）
+
+開発時は **launchd は使わず**、別手順で `uvicorn --reload` を使って起動します。
+
+```bash
+. .venv/bin/activate
+export RUN_MODE=dev
+uvicorn api:app --reload --host 127.0.0.1 --port 8000
+```
+
+### 状態確認（「今の実行コード」を断定）
+
+`GET /status` で、**実行中APIがどのコード（gitコミット）で、いつ起動したか**が分かります。
+
+- `version`: APIのバージョン（FastAPIの `app.version`）
+- `git_sha`: 実行コードの git commit hash（取得できない場合は `unknown`）
+- `started_at`: APIの起動時刻（UTC）
+- `run_mode`: `RUN_MODE`（`prod` / `dev` 等）
+
+例:
+
+```bash
+curl -sS http://127.0.0.1:8000/status | python -m json.tool
+```
+
 ## GitHub Pages（フロントエンド）で叩く
 
 `docs/` に GitHub Pages 用のシンプルなチャット画面（HTML/JS）を置いてあります。
@@ -109,6 +134,14 @@ cloudflared tunnel --url http://localhost:8000
 ```
 
 ログに表示される `https://xxxx.trycloudflare.com` のようなURLを、GitHub Pagesの画面で **API Base URL** に貼り付けて `/chat` が叩けるか確認してください。
+
+### 404（Not Found）が出る場合
+
+APIサーバー側のバージョン差分により、`/search`・`/generate` が未実装で `POST /chat` のみ提供している構成があります。  
+その場合、フロント（`docs/app.js`）は **`/search` / `/generate` が 404 のとき自動的に `/chat` にフォールバック**します。
+
+- まず確認: `GET /status` と `GET /sources` が返るか
+- チャットが404になる場合: API Base URL が別サービスに向いている可能性があるため、`cloudflared tunnel --url http://localhost:8000` のURLを貼り直してください
 
 ### PDFを追加する（アップロード機能は無し）
 
@@ -171,6 +204,9 @@ curl -sS http://127.0.0.1:8000/status
 
 - `api.log`
 - `api.error.log`
+
+起動直後に `api.log` へ、起動設定（`PDF_DIR` / `CHROMA_PERSIST_DIR` 等）と `git_sha` / `started_at` が1行JSONで出ます。  
+**「修正したのに挙動が変わらない」** と感じたら、まず `/status` の `git_sha` が想定どおりか確認してください。
 
 ### 3) macOS側の設定（推奨）
 

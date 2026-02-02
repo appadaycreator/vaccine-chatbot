@@ -155,6 +155,24 @@ async function postGenerate({ apiBase, prompt, model, context, signal }) {
   );
 }
 
+async function postChat({ apiBase, prompt, model, k, signal }) {
+  const url = `${apiBase}/chat`;
+  return await postJson(
+    url,
+    {
+      prompt,
+      model,
+      k,
+      max_tokens: 120,
+      timeout_s: 240,
+      embedding_timeout_s: 240,
+      search_timeout_s: 120,
+      generate_timeout_s: 240,
+    },
+    { signal }
+  );
+}
+
 async function getSources(apiBase) {
   const res = await fetch(`${apiBase}/sources`);
   const bodyText = await res.text();
@@ -364,6 +382,23 @@ function main() {
     } catch (err) {
       if (err && err.name === "AbortError") {
         setStatus("キャンセルしました。");
+      } else if (err && err.status === 404) {
+        // 互換: 旧APIは /search, /generate が無く /chat のみの場合がある
+        setProgress("処理中: /chat（互換モード）…");
+        try {
+          const chatRes = await postChat({ apiBase, prompt, model, k, signal: currentController.signal });
+          addMessage("assistant", (chatRes && chatRes.answer) || "", {
+            model,
+            sources: chatRes && chatRes.sources ? chatRes.sources : null,
+            timings: chatRes && chatRes.timings ? chatRes.timings : null,
+          });
+        } catch (e2) {
+          if (e2 && e2.name === "AbortError") {
+            setStatus("キャンセルしました。");
+          } else {
+            setStatus(`エラー: ${formatApiError(e2)}`, true);
+          }
+        }
       } else {
         setStatus(`エラー: ${formatApiError(err)}`, true);
       }

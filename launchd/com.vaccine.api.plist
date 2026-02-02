@@ -35,6 +35,10 @@
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 
+        <!-- 実行モード: 本番/常駐は prod（開発は README の --reload 手順を参照） -->
+        <key>RUN_MODE</key>
+        <string>prod</string>
+
         <!-- 任意: PDF/DBパスを変えたい場合に使う -->
         <key>PDF_PATH</key>
         <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/vaccine_manual.pdf</string>
