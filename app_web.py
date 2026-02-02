@@ -26,6 +26,8 @@ with st.sidebar:
     k = st.slider("検索の強さ（k値）", min_value=1, max_value=10, value=3, step=1)
     st.caption("埋め込みモデル: `nomic-embed-text`（固定）")
     st.caption("PDFはサーバー側で `./pdfs/`（環境変数 `PDF_DIR`）に配置して利用します。")
+    st.divider()
+    st.caption("操作ヒント: 「例」ボタンで質問を自動送信 / 「再送」で最後の質問をもう一度送れます。")
 
 
 def _no_sources_answer(question: str) -> str:
@@ -143,6 +145,35 @@ with col1:
         st.session_state.messages = []
         st.rerun()
 
+# 横展開（UX最低限）: 例ボタン / 再送
+if "queued_prompt" not in st.session_state:
+    st.session_state.queued_prompt = ""
+if "last_user_prompt" not in st.session_state:
+    st.session_state.last_user_prompt = ""
+
+quick_items = [
+    "接種後7日間に記録する項目は？",
+    "37.5度以上の発熱が出たらどうすればいい？",
+    "接種部位の腫れ・痛みはどのくらい続く？（資料にある範囲で）",
+    "相談先（医療機関/自治体/119）の判断の目安は？",
+]
+
+qcols = st.columns([1, 1, 1, 1])
+for i, text in enumerate(quick_items):
+    with qcols[i]:
+        if st.button(f"例: {text}", use_container_width=True):
+            st.session_state.queued_prompt = text
+            st.rerun()
+
+rs_col1, rs_col2 = st.columns([1, 3])
+with rs_col1:
+    if st.button("再送", disabled=not bool(st.session_state.last_user_prompt)):
+        st.session_state.queued_prompt = st.session_state.last_user_prompt
+        st.rerun()
+with rs_col2:
+    if st.session_state.last_user_prompt:
+        st.caption(f"最後の質問: {st.session_state.last_user_prompt}")
+
 # チャット履歴の初期化
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -189,27 +220,34 @@ def _extract_sources(docs):
     return sources
 
 # ユーザー入力
-if prompt := st.chat_input("質問をどうぞ"):
+prompt = st.chat_input("質問をどうぞ")
+if not prompt and st.session_state.queued_prompt:
+    prompt = st.session_state.queued_prompt
+    st.session_state.queued_prompt = ""
+
+if prompt:
+    st.session_state.last_user_prompt = prompt
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     # RAGロジック
     with st.chat_message("assistant"):
-        with st.spinner("資料を確認中..."):
-            # 検索
-            docs = vectorstore.similarity_search(prompt, k=k)
-            context = "\n".join([doc.page_content for doc in docs])
-            sources = _extract_sources(docs)
+        try:
+            with st.spinner("資料を確認中..."):
+                # 検索
+                docs = vectorstore.similarity_search(prompt, k=k)
+                context = "\n".join([doc.page_content for doc in docs])
+                sources = _extract_sources(docs)
 
-            # 根拠が取れない場合は、生成せずに固定フォーマットで返す（断定/hallucination防止）
-            if not sources:
-                answer = _no_sources_answer(prompt)
-            else:
-                full_prompt = _build_answer_prompt(question=prompt, context=context)
-                response = ollama.generate(model=llm_model, prompt=full_prompt)
-                answer = response["response"]
-            
+                # 根拠が取れない場合は、生成せずに固定フォーマットで返す（断定/hallucination防止）
+                if not sources:
+                    answer = _no_sources_answer(prompt)
+                else:
+                    full_prompt = _build_answer_prompt(question=prompt, context=context)
+                    response = ollama.generate(model=llm_model, prompt=full_prompt)
+                    answer = response["response"]
+
             st.markdown(answer)
             if sources:
                 pages = []
@@ -229,3 +267,8 @@ if prompt := st.chat_input("質問をどうぞ"):
                             st.caption(s["excerpt"])
 
             st.session_state.messages.append({"role": "assistant", "content": answer, "sources": sources})
+        except Exception as e:
+            st.error("エラーが発生しました。まずは Ollama / PDF / 設定（k値・モデル）を確認してください。")
+            with st.expander("ログ全文（展開）"):
+                st.code(str(e))
+            st.session_state.messages.append({"role": "assistant", "content": f"エラー: {e}"})

@@ -67,6 +67,19 @@
       </section>
 
       <section class="card">
+        <div class="diag-header">
+          <h2>環境チェック</h2>
+          <span id="diagOverall" class="pill pill--yellow">未確認</span>
+        </div>
+        <p class="muted">
+          Ollama未起動・モデル未DLなど、<strong>「なぜ動かないか」</strong>を表示します（APIの <code>/diagnostics</code> を参照）。
+        </p>
+        <div class="muted small" id="diagSummary"></div>
+        <div class="muted small error" id="diagError"></div>
+        <ul class="diag-list" id="diagList"></ul>
+      </section>
+
+      <section class="card">
         <h2>参照ソース（PDF一覧）</h2>
         <p class="muted">
           APIサーバー側で <code>PDF_DIR</code>（既定: <code>./pdfs</code>）に置かれたPDFを参照します。
@@ -88,28 +101,32 @@
 
       <section class="card card--chat">
         <h2>チャット</h2>
+        <div class="quick" id="quickQuestions" aria-label="例: よくある質問"></div>
         <div id="messages" class="messages" aria-live="polite"></div>
         <div id="progress" class="muted small progress" aria-live="polite"></div>
         <div id="guard" class="muted small error" aria-live="polite"></div>
         <form id="chatForm" class="composer">
-          <input
+          <textarea
             id="prompt"
-            type="text"
             placeholder="質問を入力…"
             autocomplete="off"
             spellcheck="true"
             required
-          />
+            rows="3"
+          ></textarea>
           <button id="send" class="btn" type="submit">送信</button>
+          <button id="resend" class="btn btn--secondary" type="button" disabled>再送</button>
           <button id="cancel" class="btn btn--secondary" type="button" hidden>キャンセル</button>
         </form>
         <div class="muted small">
+          入力: Enterで送信 / Shift+Enterで改行 / ↑↓で履歴<br />
           ヒント: URLに <code>?api=...</code> を付けても設定できます（例:
           <code>?api=https%3A%2F%2Fxxxx.trycloudflare.com</code>）
         </div>
       </section>
     </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

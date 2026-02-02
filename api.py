@@ -1,16 +1,21 @@
 import asyncio
+import contextvars
 import json
+import logging
 import os
 import platform
 import shutil
 import subprocess
+import sys
 import threading
 import time
+import uuid
+from collections import Counter, deque
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import ollama
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langchain_community.document_loaders import PyPDFLoader
@@ -33,6 +38,104 @@ DEFAULT_EMBEDDING_TIMEOUT_S = 180
 DEFAULT_SEARCH_TIMEOUT_S = 60
 DEFAULT_GENERATE_TIMEOUT_S = 180
 DEFAULT_CACHE_MAX_ENTRIES = 512
+DEFAULT_INDEX_CHECK_TIMEOUT_S = 120
+
+REQUEST_ID_HEADER = "X-Request-ID"
+_request_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("request_id", default=None)
+
+
+class _RequestIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        rid = getattr(record, "request_id", None) or _request_id_ctx.get()
+        record.request_id = rid or "-"
+        # stderr formatter が KeyError にならないようデフォルトを入れる
+        if not hasattr(record, "event"):
+            record.event = "-"
+        if not hasattr(record, "stage"):
+            record.stage = "-"
+        if not hasattr(record, "code"):
+            record.code = "-"
+        return True
+
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "ts": datetime.now(tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "request_id": getattr(record, "request_id", _request_id_ctx.get()) or "-",
+        }
+        for k in (
+            "event",
+            "method",
+            "path",
+            "status_code",
+            "stage",
+            "code",
+            "timeout_s",
+            "timings",
+            "extra",
+        ):
+            v = getattr(record, k, None)
+            if v is not None:
+                payload[k] = v
+        if record.exc_info:
+            try:
+                etype = record.exc_info[0].__name__ if record.exc_info[0] else None
+                payload["error_type"] = etype
+                payload["error"] = str(record.exc_info[1]) if record.exc_info[1] else None
+            except Exception:
+                pass
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _get_logger() -> logging.Logger:
+    logger = logging.getLogger("vaccine_api")
+    if getattr(logger, "_configured", False):
+        return logger
+    logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+    logger.propagate = False
+
+    h_out = logging.StreamHandler(sys.stdout)
+    h_out.setLevel(logger.level)
+    h_out.addFilter(_RequestIdFilter())
+    h_out.setFormatter(_JsonFormatter())
+
+    h_err = logging.StreamHandler(sys.stderr)
+    h_err.setLevel(logging.WARNING)
+    h_err.addFilter(_RequestIdFilter())
+    h_err.setFormatter(
+        logging.Formatter(
+            "%(asctime)sZ %(levelname)s request_id=%(request_id)s event=%(event)s stage=%(stage)s code=%(code)s msg=%(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+    )
+
+    logger.addHandler(h_out)
+    logger.addHandler(h_err)
+    logger._configured = True  # type: ignore[attr-defined]
+    return logger
+
+
+logger = _get_logger()
+
+
+_recent_errors: deque[dict[str, Any]] = deque(maxlen=50)
+_error_counts: Counter[str] = Counter()
+_error_lock = threading.Lock()
+
+
+def _record_error(item: dict[str, Any]) -> None:
+    code = str(item.get("code") or "UNKNOWN")
+    with _error_lock:
+        _recent_errors.append(item)
+        _error_counts[code] += 1
+
+
+def _new_request_id() -> str:
+    return uuid.uuid4().hex
 
 # 回答品質（医療系の言い方）を最低ラインで保証するための固定フォーマット
 # - 断定・誤誘導を避けるため、根拠（sources）が取れない場合は必ず「資料にない」を返す
@@ -95,6 +198,121 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _request_observability_middleware(request: Request, call_next):
+    rid = request.headers.get(REQUEST_ID_HEADER) or _new_request_id()
+    token = _request_id_ctx.set(rid)
+    request.state.request_id = rid
+    t0 = time.perf_counter()
+    try:
+        response = await call_next(request)
+    finally:
+        _request_id_ctx.reset(token)
+    try:
+        response.headers[REQUEST_ID_HEADER] = rid
+    except Exception:
+        pass
+    try:
+        logger.info(
+            "request_finished",
+            extra={
+                "event": "request_finished",
+                "request_id": rid,
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": getattr(response, "status_code", None),
+                "timings": {"request_ms": int((time.perf_counter() - t0) * 1000)},
+            },
+        )
+    except Exception:
+        pass
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def _observability_http_exception_handler(request: Request, exc: HTTPException):
+    rid = getattr(request.state, "request_id", None) or _new_request_id()
+    detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+    stage = detail.get("stage") if isinstance(detail, dict) else None
+    code = detail.get("code") if isinstance(detail, dict) else None
+    timings = detail.get("timings") if isinstance(detail, dict) else None
+    timeout_s = detail.get("timeout_s") if isinstance(detail, dict) else None
+
+    item = {
+        "ts": datetime.now(tz=timezone.utc).isoformat(),
+        "request_id": rid,
+        "method": request.method,
+        "path": request.url.path,
+        "status_code": exc.status_code,
+        "stage": stage,
+        "code": code,
+        "message": detail.get("message") if isinstance(detail, dict) else str(exc.detail),
+        "timings": timings,
+    }
+    # 422（バリデーション）はノイズになりがちなので除外
+    if exc.status_code != 422:
+        _record_error(item)
+
+    level = logging.ERROR if exc.status_code >= 500 else logging.WARNING
+    try:
+        logger.log(
+            level,
+            "http_error",
+            extra={
+                "event": "http_error",
+                "request_id": rid,
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": exc.status_code,
+                "stage": stage,
+                "code": code,
+                "timeout_s": timeout_s,
+                "timings": timings,
+                "extra": {"detail": detail},
+            },
+        )
+    except Exception:
+        pass
+
+    resp = JSONResponse(status_code=exc.status_code, content={"detail": detail})
+    resp.headers[REQUEST_ID_HEADER] = rid
+    return resp
+
+
+@app.exception_handler(Exception)
+async def _observability_unhandled_exception_handler(request: Request, exc: Exception):
+    rid = getattr(request.state, "request_id", None) or _new_request_id()
+    item = {
+        "ts": datetime.now(tz=timezone.utc).isoformat(),
+        "request_id": rid,
+        "method": request.method,
+        "path": request.url.path,
+        "status_code": 500,
+        "stage": "unhandled",
+        "code": "UNHANDLED_EXCEPTION",
+        "message": str(exc),
+    }
+    _record_error(item)
+    logger.exception(
+        "unhandled_exception",
+        extra={
+            "event": "unhandled_exception",
+            "request_id": rid,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": 500,
+            "stage": "unhandled",
+            "code": "UNHANDLED_EXCEPTION",
+        },
+    )
+    resp = JSONResponse(
+        status_code=500,
+        content={"detail": {"stage": "unhandled", "code": "UNHANDLED_EXCEPTION", "message": "Internal Server Error"}},
+    )
+    resp.headers[REQUEST_ID_HEADER] = rid
+    return resp
 
 
 class ChatRequest(BaseModel):
@@ -575,6 +793,7 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
             pass
 
     run_id = int(time.time() * 1000)
+    t0 = time.perf_counter()
     _update_index_status(
         {
             "running": True,
@@ -585,6 +804,17 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
             "last_error": None,
         }
     )
+    try:
+        logger.info(
+            "index_start",
+            extra={
+                "event": "index_start",
+                "stage": "index",
+                "extra": {"run_id": run_id, "trigger": trigger, "force": bool(force), "pdf_count": len(paths), "persist_dir": persist_dir},
+            },
+        )
+    except Exception:
+        pass
 
     try:
         prev_sig = getattr(app.state, "source_signature", None)
@@ -614,6 +844,18 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
                 "index_status": _get_index_status(),
             },
         )
+        try:
+            logger.info(
+                "index_success",
+                extra={
+                    "event": "index_success",
+                    "stage": "index",
+                    "timings": {"index_ms": int((time.perf_counter() - t0) * 1000)},
+                    "extra": {"run_id": run_id, "trigger": trigger, "summary": (report or {}).get("summary")},
+                },
+            )
+        except Exception:
+            pass
     except Exception as e:
         # 失敗時は、既存の vectorstore / signature をなるべく維持する（途中で消していない想定）
         app.state.init_error = str(e)
@@ -646,6 +888,19 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
                 "index_status": _get_index_status(),
             },
         )
+        try:
+            logger.error(
+                "index_failed",
+                extra={
+                    "event": "index_failed",
+                    "stage": "index",
+                    "code": "INDEX_BUILD_FAILED",
+                    "timings": {"index_ms": int((time.perf_counter() - t0) * 1000)},
+                    "extra": {"run_id": run_id, "trigger": trigger, "error": str(e), "report": report},
+                },
+            )
+        except Exception:
+            pass
         # 例外は上位へ（/reload などでエラー表示できるように）
         raise
 
@@ -719,11 +974,12 @@ async def _startup() -> None:
 
     # launchd の StandardOutPath に落ちる想定（起動時の設定・バージョンを必ず残す）
     try:
-        print(
-            json.dumps(
-                {
-                    "ts": datetime.now(tz=timezone.utc).isoformat(),
-                    "event": "startup",
+        logger.info(
+            "startup",
+            extra={
+                "event": "startup",
+                "stage": "startup",
+                "extra": {
                     "version": getattr(app.state, "version", None),
                     "git_sha": getattr(app.state, "git_sha", None),
                     "started_at": getattr(app.state, "started_at", None),
@@ -737,8 +993,7 @@ async def _startup() -> None:
                     "python": platform.python_version(),
                     "cwd": os.getcwd(),
                 },
-                ensure_ascii=False,
-            )
+            },
         )
     except Exception:
         pass
@@ -752,6 +1007,9 @@ def health() -> dict[str, str | bool]:
 @app.get("/status")
 def status() -> dict[str, Any]:
     pdfs = _list_pdf_paths(getattr(app.state, "pdf_path", DEFAULT_PDF_PATH), getattr(app.state, "pdf_dir", DEFAULT_PDF_DIR))
+    with _error_lock:
+        recent = list(_recent_errors)
+        counts = dict(_error_counts)
     return {
         "version": getattr(app.state, "version", None),
         "git_sha": getattr(app.state, "git_sha", None),
@@ -770,6 +1028,8 @@ def status() -> dict[str, Any]:
         "embed_warmup": getattr(app.state, "embed_warmup", None),
         "embedding_cache": getattr(app.state, "embedding_cache", _LRUCache(DEFAULT_CACHE_MAX_ENTRIES)).stats(),
         "last_request_timings": getattr(app.state, "last_request_timings", None),
+        "recent_errors": recent[-20:],
+        "error_counts": counts,
     }
 
 
@@ -850,11 +1110,22 @@ def list_sources() -> dict[str, Any]:
 
 
 @app.post("/reload")
-async def reload_sources() -> dict[str, Any]:
+async def reload_sources(request: Request) -> dict[str, Any]:
     lock: asyncio.Lock = app.state.ingest_lock
 
     # 多重実行は待たずに拒否（UIからも分かるように running を返す）
     if lock.locked():
+        logger.warning(
+            "reload_rejected",
+            extra={
+                "event": "reload_rejected",
+                "method": request.method,
+                "path": request.url.path,
+                "stage": "index",
+                "code": "INDEXING_IN_PROGRESS",
+                "extra": {"indexing": _get_index_status()},
+            },
+        )
         return JSONResponse(
             status_code=409,
             content={
@@ -888,6 +1159,16 @@ async def reload_sources() -> dict[str, Any]:
                 pass
 
     app.state.index_task = asyncio.create_task(_task())
+    logger.info(
+        "reload_accepted",
+        extra={
+            "event": "reload_accepted",
+            "method": request.method,
+            "path": request.url.path,
+            "stage": "index",
+            "extra": {"run_id": run_id},
+        },
+    )
     return JSONResponse(
         status_code=202,
         content={
@@ -980,6 +1261,9 @@ async def _embed_query_with_cache(prompt: str, timeout_s: int) -> tuple[list[flo
 
 
 async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_timeout_s: int) -> dict[str, Any]:
+    timings: dict[str, Any] = {}
+    t_total0 = time.perf_counter()
+
     # PDF配置の変更があれば自動追従（重い処理なので排他）
     lock: asyncio.Lock = app.state.ingest_lock
     if lock.locked() and bool(_get_index_status().get("running") is True):
@@ -991,11 +1275,32 @@ async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_time
             extra={"indexing": _get_index_status()},
             status_code=503,
         )
+
+    index_check_timeout_s = int(os.environ.get("INDEX_CHECK_TIMEOUT_S", str(DEFAULT_INDEX_CHECK_TIMEOUT_S)))
+    t_index0 = time.perf_counter()
     async with lock:
         try:
-            await asyncio.to_thread(_ensure_index_uptodate, False, "auto")
+            await asyncio.wait_for(asyncio.to_thread(_ensure_index_uptodate, False, "auto"), timeout=index_check_timeout_s)
             app.state.init_error = None
+            timings["index_check_ms"] = int((time.perf_counter() - t_index0) * 1000)
+        except TimeoutError:
+            timings["index_check_ms"] = int((time.perf_counter() - t_index0) * 1000)
+            _http_error(
+                stage="index_check",
+                code="INDEX_CHECK_TIMEOUT",
+                message="index確認（PDF差分チェック/必要なら再インデックス）がタイムアウトしました",
+                timeout_s=index_check_timeout_s,
+                hints=[
+                    "PDFの追加直後はインデックスが重い場合があります。POST /reload を実行し、完了後に再送してください",
+                    "PDF数が多い場合は分割・整理を検討してください",
+                    "サーバー負荷が高い場合は時間をおいて再送してください",
+                ],
+                timings={**timings, "total_ms": int((time.perf_counter() - t_total0) * 1000)},
+                extra={"indexing": _get_index_status()},
+                status_code=504,
+            )
         except Exception as e:
+            timings["index_check_ms"] = int((time.perf_counter() - t_index0) * 1000)
             app.state.vectorstore = None
             app.state.init_error = str(e)
 
@@ -1011,6 +1316,7 @@ async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_time
                 "PDFを追加・更新したら POST /reload で再インデックスしてください",
                 "GET /status で init_error / pdf_count を確認してください",
             ],
+            timings={**timings, "total_ms": int((time.perf_counter() - t_total0) * 1000)},
             extra={
                 "persist_dir": getattr(app.state, "persist_dir", DEFAULT_PERSIST_DIR),
                 "pdf_path": getattr(app.state, "pdf_path", DEFAULT_PDF_PATH),
@@ -1019,9 +1325,6 @@ async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_time
             },
             status_code=503,
         )
-
-    timings: dict[str, Any] = {}
-    t_total0 = time.perf_counter()
 
     # embedding
     t_embed0 = time.perf_counter()
@@ -1164,91 +1467,109 @@ async def _run_generate(prompt: str, context: str, model: str, max_tokens: int, 
 
 
 @app.post("/search")
-async def search_endpoint(request: SearchRequest):
-    et, st, _ = _resolve_timeouts(request.timeout_s, request.embedding_timeout_s, request.search_timeout_s, None)
-    result = await _run_search(request.prompt, request.k, embedding_timeout_s=et, search_timeout_s=st)
+async def search_endpoint(payload: SearchRequest, request: Request):
+    et, st, _ = _resolve_timeouts(payload.timeout_s, payload.embedding_timeout_s, payload.search_timeout_s, None)
+    result = await _run_search(payload.prompt, payload.k, embedding_timeout_s=et, search_timeout_s=st)
     docs = result["docs"]
     timings = result["timings"]
     app.state.last_request_timings = {"stage": "search", **timings}
-    try:
-        print(json.dumps({"ts": datetime.now(tz=timezone.utc).isoformat(), "event": "search", "k": request.k, "timings": timings}, ensure_ascii=False))
-    except Exception:
-        pass
+    logger.info(
+        "search",
+        extra={
+            "event": "search",
+            "method": request.method,
+            "path": request.url.path,
+            "stage": "search",
+            "extra": {"k": payload.k},
+            "timings": timings,
+        },
+    )
     return {"context": result["context"], "sources": _extract_sources(docs), "timings": timings}
 
 
 @app.post("/generate")
-async def generate_endpoint(request: GenerateRequest):
-    _, _, gt = _resolve_timeouts(request.timeout_s, None, None, request.generate_timeout_s)
+async def generate_endpoint(payload: GenerateRequest, request: Request):
+    _, _, gt = _resolve_timeouts(payload.timeout_s, None, None, payload.generate_timeout_s)
     result = await _run_generate(
-        prompt=request.prompt,
-        context=(request.context or "")[: MAX_CONTEXT_CHARS + 500],
-        model=request.model,
-        max_tokens=request.max_tokens,
+        prompt=payload.prompt,
+        context=(payload.context or "")[: MAX_CONTEXT_CHARS + 500],
+        model=payload.model,
+        max_tokens=payload.max_tokens,
         generate_timeout_s=gt,
     )
     timings = result["timings"]
     app.state.last_request_timings = {"stage": "generate", **timings}
-    try:
-        print(json.dumps({"ts": datetime.now(tz=timezone.utc).isoformat(), "event": "generate", "model": request.model, "timings": timings}, ensure_ascii=False))
-    except Exception:
-        pass
+    logger.info(
+        "generate",
+        extra={
+            "event": "generate",
+            "method": request.method,
+            "path": request.url.path,
+            "stage": "generate",
+            "extra": {"model": payload.model},
+            "timings": timings,
+        },
+    )
     return {"answer": result["answer"], "timings": timings}
 
 
 @app.post("/chat")
-async def chat_endpoint(request: ChatRequest):
-    try:
-        et, st, gt = _resolve_timeouts(
-            request.timeout_s,
-            request.embedding_timeout_s,
-            request.search_timeout_s,
-            request.generate_timeout_s,
-        )
+async def chat_endpoint(payload: ChatRequest, request: Request):
+    et, st, gt = _resolve_timeouts(
+        payload.timeout_s,
+        payload.embedding_timeout_s,
+        payload.search_timeout_s,
+        payload.generate_timeout_s,
+    )
 
-        search_res = await _run_search(request.prompt, request.k, embedding_timeout_s=et, search_timeout_s=st)
-        docs = search_res["docs"]
-        context = search_res["context"]
-        timings = dict(search_res["timings"])
-        sources = _extract_sources(docs)
+    search_res = await _run_search(payload.prompt, payload.k, embedding_timeout_s=et, search_timeout_s=st)
+    docs = search_res["docs"]
+    context = search_res["context"]
+    timings = dict(search_res["timings"])
+    sources = _extract_sources(docs)
 
-        # sources が取れない（=根拠0件）場合は、生成せずに「資料にない」を固定フォーマットで返す（DoD対策）
-        if not sources:
-            answer = _no_sources_answer(request.prompt)
-            timings["generate_ms"] = 0
-            timings["total_ms"] = int((timings.get("embedding_ms", 0) + timings.get("search_ms", 0)))
-            app.state.last_request_timings = {"stage": "chat", **timings}
-            return {"answer": answer, "sources": [], "timings": timings}
-
-        gen_res = await _run_generate(
-            prompt=request.prompt,
-            context=context,
-            model=request.model,
-            max_tokens=request.max_tokens,
-            generate_timeout_s=gt,
-        )
-        timings["generate_ms"] = gen_res["timings"]["generate_ms"]
-        timings["total_ms"] = int((timings.get("embedding_ms", 0) + timings.get("search_ms", 0) + timings.get("generate_ms", 0)))
-
+    # sources が取れない（=根拠0件）場合は、生成せずに「資料にない」を固定フォーマットで返す（DoD対策）
+    if not sources:
+        answer = _no_sources_answer(payload.prompt)
+        timings["generate_ms"] = 0
+        timings["total_ms"] = int((timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0)))
         app.state.last_request_timings = {"stage": "chat", **timings}
-        try:
-            print(
-                json.dumps(
-                    {
-                        "ts": datetime.now(tz=timezone.utc).isoformat(),
-                        "event": "chat",
-                        "k": request.k,
-                        "model": request.model,
-                        "timings": timings,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-        except Exception:
-            pass
-        return {"answer": gen_res["answer"], "sources": sources, "timings": timings}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.info(
+            "chat",
+            extra={
+                "event": "chat",
+                "method": request.method,
+                "path": request.url.path,
+                "stage": "chat",
+                "extra": {"k": payload.k, "model": payload.model, "sources": 0},
+                "timings": timings,
+            },
+        )
+        return {"answer": answer, "sources": [], "timings": timings}
+
+    gen_res = await _run_generate(
+        prompt=payload.prompt,
+        context=context,
+        model=payload.model,
+        max_tokens=payload.max_tokens,
+        generate_timeout_s=gt,
+    )
+    timings["generate_ms"] = gen_res["timings"]["generate_ms"]
+    timings["total_ms"] = int(
+        (timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0) + timings.get("generate_ms", 0))
+    )
+
+    app.state.last_request_timings = {"stage": "chat", **timings}
+    logger.info(
+        "chat",
+        extra={
+            "event": "chat",
+            "method": request.method,
+            "path": request.url.path,
+            "stage": "chat",
+            "extra": {"k": payload.k, "model": payload.model, "sources": len(sources)},
+            "timings": timings,
+        },
+    )
+    return {"answer": gen_res["answer"], "sources": sources, "timings": timings}
 

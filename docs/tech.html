@@ -37,7 +37,7 @@
         </ul>
         <p class="muted small">
           APIバージョン: <code>0.2.0</code><br />
-          API の主なエンドポイント: <code>/health</code>, <code>/status</code>, <code>/sources</code>, <code>/reload</code>,
+          API の主なエンドポイント: <code>/health</code>, <code>/status</code>, <code>/diagnostics</code>, <code>/sources</code>, <code>/reload</code>,
           <code>/search</code>, <code>/generate</code>, <code>/chat</code>
         </p>
       </section>
@@ -74,6 +74,7 @@
           <li><code>docs/index.html</code> + <code>docs/app.js</code> + <code>docs/style.css</code>: 静的チャットUI</li>
           <li>ブラウザから <code>POST /chat</code> を呼び出し、根拠（参照ページ）や timings を表示</li>
           <li>API Base URL は <code>localStorage</code> または <code>?api=...</code> で指定</li>
+          <li>送信中の多重実行防止、再送、入力履歴、Markdown表示、エラー要点＋詳細ログ（折りたたみ）を実装</li>
         </ul>
       </section>
 

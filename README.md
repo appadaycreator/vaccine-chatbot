@@ -81,6 +81,12 @@ python app_rag.py
 streamlit run app_web.py
 ```
 
+### Streamlit UI の操作（最低限のUX）
+
+- **例ボタン**: よくある質問をワンクリック送信します
+- **再送**: 最後の質問をもう一度送ります（不安定なときのリトライ用）
+- **エラー表示**: 画面上に要点を表示し、ログ全文は展開して確認できます
+
 ## 使い方（API / FastAPI）
 
 ### 起動
@@ -110,6 +116,8 @@ uvicorn api:app --reload --host 127.0.0.1 --port 8000
 - `git_sha`: 実行コードの git commit hash（取得できない場合は `unknown`）
 - `started_at`: APIの起動時刻（UTC）
 - `run_mode`: `RUN_MODE`（`prod` / `dev` 等）
+- `recent_errors`: 直近エラー（最大20件、簡易）
+- `error_counts`: エラーコード別の累計カウント（簡易）
 
 例:
 
@@ -120,9 +128,19 @@ curl -sS http://127.0.0.1:8000/status | python -m json.tool
 ## GitHub Pages（フロントエンド）で叩く
 
 `docs/` に GitHub Pages 用のシンプルなチャット画面（HTML/JS）を置いてあります。
+画面上部の **「環境チェック」** で、Ollama未起動・モデル未DLなどの“動かない原因”を確認できます。
 
 - GitHub Pages を `docs/` から配信するように設定（Settings → Pages → **Deploy from a branch** → **/docs**）
 - Pages を HTTPS で開き、API Base URL に `cloudflared` の公開URLを入力してテストします
+
+### 静的チャットUI（docs/）の操作（最低限のUX）
+
+- **送信中は多重実行しない**: 送信ボタン/入力欄を無効化（キャンセル可能）
+- **Enterで送信 / Shift+Enterで改行**
+- **入力履歴**: 入力欄の先頭/末尾で **↑↓** を押すと履歴を呼び出せます
+- **再送**: 最後の質問を「再送」でリトライできます
+- **エラー表示**: エラーはメッセージカードで **要点＋対処** を提示し、ログ全文は折りたたみ表示します
+- **Markdown表示**: AIの回答はMarkdownとして表示し、箇条書き等が崩れないようにしています（marked が利用できない場合はプレーン表示にフォールバック）
 
 ### Mac mini に cloudflared をインストール
 
@@ -225,8 +243,28 @@ curl -sS http://127.0.0.1:8000/status
 - `api.log`
 - `api.error.log`
 
+`api.log` は **JSONの構造化ログ** で出ます（stdout）。`api.error.log` は **1行で見やすいエラーログ**（stderr）です。  
 起動直後に `api.log` へ、起動設定（`PDF_DIR` / `CHROMA_PERSIST_DIR` 等）と `git_sha` / `started_at` が1行JSONで出ます。  
 **「修正したのに挙動が変わらない」** と感じたら、まず `/status` の `git_sha` が想定どおりか確認してください。
+
+#### request_id と工程時間（障害切り分け）
+
+“遅い/落ちた/答えない” を短時間で原因特定できるよう、APIは次をログ化します（横展開: **API**）。
+
+- **request_id**: すべてのリクエスト/レスポンスに `X-Request-ID` を付与
+  - クライアントが `X-Request-ID` を送ればそれを採用、無ければサーバーが生成します
+  - 失敗時は `api.error.log` の `request_id=...` で1回の失敗を追跡できます
+- **工程時間**（例: `/chat`）:
+  - `index_check_ms`: インデックス確認（PDF差分チェック/必要なら再インデックス）
+  - `embedding_ms`: クエリのベクトル化
+  - `search_ms`: 類似検索（ベクトルDB）
+  - `generate_ms`: 生成（LLM）
+  - `total_ms`: 合計
+- **失敗理由**: `stage` / `code` / `message`（例: `EMBEDDING_TIMEOUT`, `SEARCH_TIMEOUT`, `GENERATE_TIMEOUT`, `INDEX_CHECK_TIMEOUT` など）
+
+補足:
+
+- `INDEX_CHECK_TIMEOUT_S`（環境変数）で **index確認のタイムアウト**を調整できます（既定: 120秒）
 
 ### 3) macOS側の設定（推奨）
 
@@ -236,6 +274,7 @@ curl -sS http://127.0.0.1:8000/status
 
 - `GET /health`: ヘルスチェック
 - `GET /status`: 状態確認（PDF数、初期化エラー、timings、embeddingウォームアップ/キャッシュなど）
+- `GET /diagnostics`: 環境チェック（Ollama疎通、モデル一覧、embedding可否。UIの「環境チェック」で表示）
 - `GET /sources`: 参照PDF一覧＋インデックス状態（実行中/最終成功/エラー/次にやること）
 - `POST /reload`: 再インデックス開始（非同期。実行中は409で多重実行防止）
 - `POST /search`: 検索（embedding → 類似検索）
@@ -296,6 +335,20 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
 手元に `vaccine_manual.pdf` を置くか、`./pdfs/` にPDFを配置して利用してください。
 
 ## トラブルシューティング
+### まず「なぜ動かないか」を確認する（推奨）
+
+GitHub Pages の画面にある **「環境チェック」**（APIの `GET /diagnostics`）で、次を診断できます。
+
+- **Ollama疎通**: Ollama が起動していない/到達できない
+- **生成モデルの有無**: 選択中モデルが未インストール（例: `ollama pull gemma2:2b`）
+- **Embeddingモデルの有無/動作**: `nomic-embed-text` が未インストール、または embedding が失敗している（RAGが動かない）
+
+コマンド例:
+
+```bash
+curl -sS http://127.0.0.1:8000/diagnostics | python -m json.tool
+```
+
 ### 検索や生成が遅い / タイムアウトする
 
 遅い環境（Mac mini 等）でも「待てば返る」「どこが遅いか分かる」ように、処理を分割しています。
