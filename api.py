@@ -471,6 +471,9 @@ async def _observability_http_exception_handler(request: Request, exc: HTTPExcep
 @app.exception_handler(Exception)
 async def _observability_unhandled_exception_handler(request: Request, exc: Exception):
     rid = getattr(request.state, "request_id", None) or _new_request_id()
+    msg = str(exc).strip()
+    # クライアントに返すメッセージ（長すぎる場合は先頭のみ。パス等の露出を抑える）
+    safe_msg = (msg[:300] + "…") if len(msg) > 300 else msg if msg else "Internal Server Error"
     item = {
         "ts": datetime.now(tz=timezone.utc).isoformat(),
         "request_id": rid,
@@ -479,7 +482,7 @@ async def _observability_unhandled_exception_handler(request: Request, exc: Exce
         "status_code": 500,
         "stage": "unhandled",
         "code": "UNHANDLED_EXCEPTION",
-        "message": str(exc),
+        "message": msg,
     }
     _record_error(item)
     logger.exception(
@@ -496,7 +499,18 @@ async def _observability_unhandled_exception_handler(request: Request, exc: Exce
     )
     resp = JSONResponse(
         status_code=500,
-        content={"detail": {"stage": "unhandled", "code": "UNHANDLED_EXCEPTION", "message": "Internal Server Error"}},
+        content={
+            "detail": {
+                "stage": "unhandled",
+                "code": "UNHANDLED_EXCEPTION",
+                "message": safe_msg,
+                "hints": [
+                    "サーバー（API を動かしている端末）のターミナルやログでエラー内容を確認してください",
+                    "Ollama が起動しているか確認してください（例: brew services start ollama）",
+                    "GET /diagnostics で環境チェックを実行してください",
+                ],
+            }
+        },
     )
     resp.headers[REQUEST_ID_HEADER] = rid
     return resp
@@ -2266,7 +2280,26 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         payload.generate_timeout_s,
     )
 
-    search_res = await _run_search(payload.prompt, payload.k, embedding_timeout_s=et, search_timeout_s=st, overall_timeout_s=payload.timeout_s)
+    try:
+        search_res = await _run_search(payload.prompt, payload.k, embedding_timeout_s=et, search_timeout_s=st, overall_timeout_s=payload.timeout_s)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("chat_run_search_failed", extra={"event": "chat", "path": request.url.path})
+        _http_error(
+            stage="search",
+            code="CHAT_SEARCH_ERROR",
+            message="検索処理でエラーが発生しました",
+            hints=[
+                "サーバー（API を動かしている端末）のログで詳細を確認してください",
+                "Ollama が起動しているか確認してください",
+                "GET /status で init_error を確認してください",
+            ],
+            timings={},
+            extra={"error": str(e)},
+            status_code=500,
+        )
+
     docs = search_res["docs"]
     context = search_res["context"]
     timings = dict(search_res["timings"])
@@ -2293,13 +2326,31 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         )
         return {"answer": answer, "sources": [], "candidates": candidates, "timings": timings}
 
-    gen_res = await _run_generate(
-        prompt=payload.prompt,
-        context=context,
-        model=payload.model,
-        max_tokens=payload.max_tokens,
-        generate_timeout_s=gt,
-    )
+    try:
+        gen_res = await _run_generate(
+            prompt=payload.prompt,
+            context=context,
+            model=payload.model,
+            max_tokens=payload.max_tokens,
+            generate_timeout_s=gt,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("chat_run_generate_failed", extra={"event": "chat", "path": request.url.path})
+        _http_error(
+            stage="generate",
+            code="CHAT_GENERATE_ERROR",
+            message="回答生成でエラーが発生しました",
+            hints=[
+                "Ollama が起動しているか、選択中のモデルが存在するか確認してください（ollama list）",
+                "サーバーのログで詳細を確認してください",
+            ],
+            timings=timings,
+            extra={"error": str(e)},
+            status_code=500,
+        )
+
     timings["generate_ms"] = gen_res["timings"]["generate_ms"]
     timings["total_ms"] = int(
         (timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0) + timings.get("generate_ms", 0))
