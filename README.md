@@ -137,11 +137,11 @@ cloudflared tunnel --url http://localhost:8000
 
 ### 404（Not Found）が出る場合
 
-APIサーバー側のバージョン差分により、`/search`・`/generate` が未実装で `POST /chat` のみ提供している構成があります。  
-その場合、フロント（`docs/app.js`）は **`/search` / `/generate` が 404 のとき自動的に `/chat` にフォールバック**します。
+フロント（`docs/app.js`）は **基本的に `POST /chat` のみ**を叩きます。  
+それでも 404 が出る場合は、API Base URL が **FastAPI（uvicorn）ではなく別サービス（例: Streamlit 等）**を指している可能性が高いです。
 
-- まず確認: `GET /status` と `GET /sources` が返るか
-- チャットが404になる場合: API Base URL が別サービスに向いている可能性があるため、`cloudflared tunnel --url http://localhost:8000` のURLを貼り直してください
+- まず確認: `GET /health` と `GET /status` が返るか
+- 404 になる場合: `cloudflared tunnel --url http://localhost:8000` で発行されたURLを貼り直してください
 
 ### PDFを追加する（アップロード機能は無し）
 
@@ -220,7 +220,7 @@ curl -sS http://127.0.0.1:8000/status
 - `POST /reload`: PDFを再インデックス（強制）
 - `POST /search`: 検索（embedding → 類似検索）
 - `POST /generate`: 生成（LLM応答）
-- `POST /chat`: 検索＋生成（互換用。内部的には `/search`→`/generate` 相当）
+- `POST /chat`: 検索＋生成（フロントの既定ルート。内部的には `/search`→`/generate` 相当）
 
 `POST /chat` の例:
 

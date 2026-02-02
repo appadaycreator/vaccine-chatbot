@@ -358,49 +358,36 @@ function main() {
     addMessage("user", prompt);
     setStatus("送信しました。");
     setBusy(true);
-    setProgress("処理中: 検索（embedding → 類似検索）…");
+    setProgress("処理中: /chat（検索＋生成）…");
     currentController = new AbortController();
 
     try {
-      const searchRes = await postSearch({ apiBase, prompt, k, signal: currentController.signal });
-      setProgress("処理中: 生成…");
-      const genRes = await postGenerate({
-        apiBase,
-        prompt,
-        model,
-        context: searchRes.context || "",
-        signal: currentController.signal,
-      });
-      const timings = Object.assign({}, searchRes.timings || {}, genRes.timings || {});
+      const chatRes = await postChat({ apiBase, prompt, model, k, signal: currentController.signal });
+      const timings = Object.assign({}, chatRes.timings || {});
       if (typeof timings.total_ms !== "number") {
         const a = typeof timings.embedding_ms === "number" ? timings.embedding_ms : 0;
         const b = typeof timings.search_ms === "number" ? timings.search_ms : 0;
         const c = typeof timings.generate_ms === "number" ? timings.generate_ms : 0;
         timings.total_ms = a + b + c;
       }
-      addMessage("assistant", genRes.answer || "", { model, sources: searchRes.sources, timings });
+      addMessage("assistant", (chatRes && chatRes.answer) || "", {
+        model,
+        sources: chatRes && chatRes.sources ? chatRes.sources : null,
+        timings,
+      });
     } catch (err) {
       if (err && err.name === "AbortError") {
         setStatus("キャンセルしました。");
-      } else if (err && err.status === 404) {
-        // 互換: 旧APIは /search, /generate が無く /chat のみの場合がある
-        setProgress("処理中: /chat（互換モード）…");
-        try {
-          const chatRes = await postChat({ apiBase, prompt, model, k, signal: currentController.signal });
-          addMessage("assistant", (chatRes && chatRes.answer) || "", {
-            model,
-            sources: chatRes && chatRes.sources ? chatRes.sources : null,
-            timings: chatRes && chatRes.timings ? chatRes.timings : null,
-          });
-        } catch (e2) {
-          if (e2 && e2.name === "AbortError") {
-            setStatus("キャンセルしました。");
-          } else {
-            setStatus(`エラー: ${formatApiError(e2)}`, true);
-          }
-        }
       } else {
-        setStatus(`エラー: ${formatApiError(err)}`, true);
+        // 404 の場合は「別ポート/別サービスを tunnel している」ことが多いので、ヒントを出す
+        if (err && err.status === 404) {
+          setStatus(
+            `エラー: ${formatApiError(err)}\nAPI Base URL が FastAPI（uvicorn）を指しているか確認してください（例: cloudflared tunnel --url http://localhost:8000）。`,
+            true
+          );
+        } else {
+          setStatus(`エラー: ${formatApiError(err)}`, true);
+        }
       }
     }
     setBusy(false);
