@@ -38,6 +38,10 @@
           <li><code>CORS</code>: GitHub Pages からのアクセスを許可（現状は <code>allow_origins=["*"]</code>）</li>
         </ul>
         <p class="muted small">
+          補足: ブラウザ上で <code>blocked by CORS policy</code> と表示されても、実際には API 側が <code>500</code> を返している（またはトンネル先が落ちている）だけのことがあります。
+          まず <code>GET /health</code> → <code>GET /status</code> → <code>GET /sources</code> の順で 200 が返るかを確認してください（UIは起動時に <code>/sources</code> を呼びます）。
+        </p>
+        <p class="muted small">
           APIバージョン: <code>0.2.0</code><br />
           API の主なエンドポイント: <code>/health</code>, <code>/status</code>, <code>/diagnostics</code>, <code>/sources</code>, <code>/reload</code>,
           <code>/search</code>, <code>/generate</code>, <code>/chat</code>

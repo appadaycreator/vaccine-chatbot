@@ -1400,7 +1400,6 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
     paths = _list_pdf_paths(pdf_path, pdf_dir)
     sig = _source_signature(paths)
     ocr_sig = _ocr_signature()
-    ocr_sig = _ocr_signature()
 
     last_sig = getattr(app.state, "source_signature", None)
     last_ocr_sig = getattr(app.state, "ocr_settings_signature", None)
@@ -1725,6 +1724,7 @@ def list_sources() -> dict[str, Any]:
 
     paths = _list_pdf_paths(pdf_path, pdf_dir)
     sig = _source_signature(paths)
+    ocr_sig = _ocr_signature()
 
     index_status = _get_index_status()
     report = index_status.get("last_report") or {}

@@ -205,6 +205,25 @@ cloudflared tunnel --url http://localhost:8000
 - 404 になる場合: `cloudflared tunnel --url http://localhost:8000` で発行されたURLを貼り直してください
 - 補足: **環境チェック（`/diagnostics`）が404だったURLは、次回のページ再読み込みでは自動的にスキップ**します（コンソールが汚れないようにするため）。URLを直した/サーバーを更新した場合は、APIのURLを入力し直して「保存」を押すと再判定します。
 
+### CORSエラーに見えるが、実はAPIの500（Internal Server Error）の場合
+
+ブラウザのコンソールで次のように見えることがあります:
+
+- `blocked by CORS policy: No 'Access-Control-Allow-Origin' header ...`
+- `GET https://xxxx.trycloudflare.com/sources net::ERR_FAILED 500`
+
+このケースは「CORS設定が無い」よりも、**APIが500を返していて（またはトンネル先が落ちていて）結果的にCORSに見えている**ことが多いです。
+まずAPI自体が生きているか、次の順で確認してください:
+
+- `GET /health`（200が返るか）
+- `GET /status`（200が返るか）
+- `GET /sources`（200が返るか。UIは起動時に `/sources` を呼びます）
+
+補足:
+
+- GitHub Pages から使う場合でも、API側は CORS を許可している必要があります（本リポジトリの FastAPI は CORS を有効化しています）。
+- **推奨導線**（CORS回避）: API配下の `http://127.0.0.1:8000/ui/`（または公開URLの `/ui/`）で開くと、同一オリジンになり CORS の影響を受けません。
+
 ### PDFを追加する（アップロード機能は無し）
 
 ブラウザからのPDFアップロードは使わず、**Mac mini 側でPDFを配置して参照**します。
