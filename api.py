@@ -191,6 +191,48 @@ def _build_answer_prompt(*, question: str, context: str) -> str:
 """.strip()
 
 
+# 根拠（PDFの該当箇所）が取れない場合のフォールバック用「参考情報」。
+# - 注意: 参照PDFに基づく“根拠”ではない。UIで根拠（引用）カードは出ない想定。
+# - それでも「まったく回答が返らない/常に資料にない」状態を避けるための“安全側の一般説明”。
+FALLBACK_KNOWLEDGE_BASE = """
+【プロトタイプ知識ベース（資料外・一般情報） 抜粋】
+- 観察期間：接種当日（0日目）から7日間
+- 記録項目：体温、接種部位の反応（腫れ・痛み）、全身反応（発熱、頭痛、倦怠感）
+- 報告が必要な症状：37.5度以上の発熱、日常生活に支障が出るほどの痛みや腫れ
+- 連絡先：各自治体の相談窓口、または接種を受けた医療機関
+""".strip()
+
+
+def _build_general_fallback_prompt(*, question: str, reference: str) -> str:
+    """
+    参照PDFから該当箇所が取れなかったときの一般説明用プロンプト。
+    - 参照PDFに基づくと“断定しない”
+    - ただしユーザーが次に取れる行動（相談先）を必ず出す
+    """
+    return f"""
+あなたは医療情報の文脈で回答するアシスタントです。
+現在、参照PDFから質問の該当箇所を特定できていません。
+そのため、以下の【参考情報】と一般的な注意として、断定を避けつつ回答してください。
+
+必ず次の3セクションだけで出力してください（見出し名は固定）:
+結論:
+根拠:
+相談先:
+
+ルール:
+- 参照PDFに基づくと断定しない（ページラベルの引用もしない）
+- 「根拠」には、【参考情報】からの引用/要約と、「一般的には…」のような前置きを使って不確実性を明示する
+- 医療判断（診断/治療の指示）をしない。迷う場合は相談先へ誘導する
+- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
+- 余計な追加セクション（注意/補足など）は出さない
+
+【参考情報】:
+{reference}
+
+質問: {question}
+""".strip()
+
+
 APP_STARTED_AT = datetime.now(tz=timezone.utc).isoformat()
 
 
@@ -346,6 +388,9 @@ class ChatRequest(BaseModel):
     embedding_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
     search_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
     generate_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
+    # 根拠（PDF該当箇所）が取れない場合でも一般説明を返す（横展開: docs UI / Streamlit）
+    # - 未指定（None）の場合は環境変数 ALLOW_GENERAL_FALLBACK_DEFAULT を参照
+    allow_general_fallback: Optional[bool] = Field(default=None)
 
 
 class SearchRequest(BaseModel):
@@ -363,6 +408,7 @@ class GenerateRequest(BaseModel):
     timeout_s: int = Field(default=180, ge=5, le=900)  # 互換（まとめて指定）
     generate_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
     context: str = Field(default="", max_length=MAX_CONTEXT_CHARS + 500)
+    allow_general_fallback: Optional[bool] = Field(default=None)
 
 
 class _LRUCache:
@@ -1892,6 +1938,24 @@ async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_time
             status_code=500,
         )
 
+    # まれに検索結果が0件になるケースを救う（kを増やして1回だけ再試行）
+    # - “資料にあるはずなのに常に資料にない” を軽減する目的
+    # - 追加のembeddingは不要（同じ vec を再利用）
+    if (not docs) and k < 20:
+        retry_k = min(20, max(8, k * 4))
+        t_retry0 = time.perf_counter()
+        try:
+            fn = getattr(vs, "similarity_search_by_vector", None)
+            if callable(fn):
+                docs = await asyncio.wait_for(asyncio.to_thread(fn, vec, k=retry_k), timeout=search_timeout_s)
+            else:
+                docs = await asyncio.wait_for(asyncio.to_thread(vs.similarity_search, prompt, k=retry_k), timeout=search_timeout_s)
+            timings["search_retry_k"] = retry_k
+            timings["search_retry_ms"] = int((time.perf_counter() - t_retry0) * 1000)
+        except Exception:
+            # 再試行が失敗しても、元の検索結果（空）のまま返す
+            pass
+
     timings["total_ms"] = int((time.perf_counter() - t_total0) * 1000)
     context = _format_context(docs)
     return {"docs": docs, "context": context, "timings": timings}
@@ -1949,6 +2013,58 @@ async def _run_generate(prompt: str, context: str, model: str, max_tokens: int, 
     return {"answer": response.get("response", ""), "timings": {"generate_ms": int((time.perf_counter() - t0) * 1000)}}
 
 
+def _env_allow_general_fallback_default() -> bool:
+    v = (os.environ.get("ALLOW_GENERAL_FALLBACK_DEFAULT", "0") or "0").strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+async def _run_generate_general_fallback(prompt: str, model: str, max_tokens: int, generate_timeout_s: int) -> dict[str, Any]:
+    t0 = time.perf_counter()
+    full_prompt = _build_general_fallback_prompt(question=prompt, reference=FALLBACK_KNOWLEDGE_BASE)
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                ollama.generate,
+                model=model,
+                prompt=full_prompt,
+                options={"num_predict": max_tokens},
+            ),
+            timeout=generate_timeout_s,
+        )
+    except TimeoutError:
+        _http_error(
+            stage="generate",
+            code="GENERATE_TIMEOUT",
+            message="生成（LLM応答）がタイムアウトしました",
+            timeout_s=generate_timeout_s,
+            hints=[
+                "初回はモデル起動で時間がかかります。しばらく待つか、タイムアウトを延長してください",
+                "軽量モデル（例: gemma2:2b）を選んでください",
+            ],
+            timings={"generate_ms": int((time.perf_counter() - t0) * 1000)},
+            status_code=504,
+        )
+    except Exception as e:
+        if _is_ollama_down_error(e):
+            _http_error(
+                stage="generate",
+                code="OLLAMA_UNAVAILABLE",
+                message="生成に失敗しました（Ollama に接続できない可能性）",
+                hints=["Ollama が起動しているか確認してください", f"モデルが存在するか確認してください（ollama pull {model}）"],
+                extra={"error": str(e)},
+                status_code=502,
+            )
+        _http_error(
+            stage="generate",
+            code="GENERATE_ERROR",
+            message="生成に失敗しました",
+            hints=["モデル名を確認してください", "Ollama のログを確認してください"],
+            extra={"error": str(e)},
+            status_code=500,
+        )
+    return {"answer": response.get("response", ""), "timings": {"generate_ms": int((time.perf_counter() - t0) * 1000)}}
+
+
 @app.post("/search")
 async def search_endpoint(payload: SearchRequest, request: Request):
     et, st, _ = _resolve_timeouts(payload.timeout_s, payload.embedding_timeout_s, payload.search_timeout_s, None)
@@ -1973,13 +2089,23 @@ async def search_endpoint(payload: SearchRequest, request: Request):
 @app.post("/generate")
 async def generate_endpoint(payload: GenerateRequest, request: Request):
     _, _, gt = _resolve_timeouts(payload.timeout_s, None, None, payload.generate_timeout_s)
-    result = await _run_generate(
-        prompt=payload.prompt,
-        context=(payload.context or "")[: MAX_CONTEXT_CHARS + 500],
-        model=payload.model,
-        max_tokens=payload.max_tokens,
-        generate_timeout_s=gt,
-    )
+    allow_fallback = payload.allow_general_fallback if payload.allow_general_fallback is not None else _env_allow_general_fallback_default()
+    context = (payload.context or "")[: MAX_CONTEXT_CHARS + 500]
+    if allow_fallback and not context.strip():
+        result = await _run_generate_general_fallback(
+            prompt=payload.prompt,
+            model=payload.model,
+            max_tokens=payload.max_tokens,
+            generate_timeout_s=gt,
+        )
+    else:
+        result = await _run_generate(
+            prompt=payload.prompt,
+            context=context,
+            model=payload.model,
+            max_tokens=payload.max_tokens,
+            generate_timeout_s=gt,
+        )
     timings = result["timings"]
     app.state.last_request_timings = {"stage": "generate", **timings}
     logger.info(
@@ -2011,11 +2137,28 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
     timings = dict(search_res["timings"])
     sources = _extract_sources(docs)
 
-    # sources が取れない（=根拠0件）場合は、生成せずに「資料にない」を固定フォーマットで返す（DoD対策）
+    allow_fallback = payload.allow_general_fallback if payload.allow_general_fallback is not None else _env_allow_general_fallback_default()
+
+    # sources が取れない（=根拠0件）の場合:
+    # - 既定: 生成せず「資料にない」（従来どおり）
+    # - allow_fallback: “参照PDFの根拠なし”を明示した上で、一般説明として回答を返す
     if not sources:
-        answer = _no_sources_answer(payload.prompt)
-        timings["generate_ms"] = 0
-        timings["total_ms"] = int((timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0)))
+        if allow_fallback:
+            gen_res = await _run_generate_general_fallback(
+                prompt=payload.prompt,
+                model=payload.model,
+                max_tokens=payload.max_tokens,
+                generate_timeout_s=gt,
+            )
+            answer = gen_res["answer"]
+            timings["generate_ms"] = gen_res["timings"]["generate_ms"]
+            timings["total_ms"] = int(
+                (timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0) + timings.get("generate_ms", 0))
+            )
+        else:
+            answer = _no_sources_answer(payload.prompt)
+            timings["generate_ms"] = 0
+            timings["total_ms"] = int((timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0)))
         app.state.last_request_timings = {"stage": "chat", **timings}
         logger.info(
             "chat",
@@ -2024,7 +2167,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
                 "method": request.method,
                 "path": request.url.path,
                 "stage": "chat",
-                "extra": {"k": payload.k, "model": payload.model, "sources": 0},
+                "extra": {"k": payload.k, "model": payload.model, "sources": 0, "fallback": bool(allow_fallback)},
                 "timings": timings,
             },
         )

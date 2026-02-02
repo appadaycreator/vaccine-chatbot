@@ -297,6 +297,44 @@ def _no_sources_answer(question: str) -> str:
         "- 症状が強い／急に悪化した／緊急性が疑われる場合: 119（救急）\n"
     )
 
+FALLBACK_KNOWLEDGE_BASE = """
+【プロトタイプ知識ベース（資料外・一般情報） 抜粋】
+- 観察期間：接種当日（0日目）から7日間
+- 記録項目：体温、接種部位の反応（腫れ・痛み）、全身反応（発熱、頭痛、倦怠感）
+- 報告が必要な症状：37.5度以上の発熱、日常生活に支障が出るほどの痛みや腫れ
+- 連絡先：各自治体の相談窓口、または接種を受けた医療機関
+""".strip()
+
+
+def _env_allow_general_fallback_default() -> bool:
+    v = (os.environ.get("ALLOW_GENERAL_FALLBACK_DEFAULT", "0") or "0").strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+def _build_general_fallback_prompt(*, question: str, reference: str) -> str:
+    return f"""
+あなたは医療情報の文脈で回答するアシスタントです。
+現在、参照PDFから質問の該当箇所を特定できていません。
+そのため、以下の【参考情報】と一般的な注意として、断定を避けつつ回答してください。
+
+必ず次の3セクションだけで出力してください（見出し名は固定）:
+結論:
+根拠:
+相談先:
+
+ルール:
+- 参照PDFに基づくと断定しない（ページラベルの引用もしない）
+- 「根拠」には、【参考情報】からの引用/要約と、「一般的には…」のような前置きを使って不確実性を明示する
+- 医療判断（診断/治療の指示）をしない。迷う場合は相談先へ誘導する
+- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
+- 余計な追加セクション（注意/補足など）は出さない
+
+【参考情報】:
+{reference}
+
+質問: {question}
+""".strip()
+
 
 def _build_answer_prompt(*, question: str, context: str) -> str:
     return f"""
@@ -319,14 +357,19 @@ def _build_answer_prompt(*, question: str, context: str) -> str:
 質問: {question}
 """.strip()
 
-def rag_chatbot(user_query):
+def rag_chatbot(user_query, *, allow_general_fallback: bool | None = None):
     # 3. 関連情報の検索
     docs = vectorstore.similarity_search(user_query, k=3)
     context = "\n".join([doc.page_content for doc in docs])
 
     # 4. LLMへの問い合わせ
     if not docs or not context.strip():
-        return _no_sources_answer(user_query)
+        allow = allow_general_fallback if allow_general_fallback is not None else _env_allow_general_fallback_default()
+        if not allow:
+            return _no_sources_answer(user_query)
+        prompt = _build_general_fallback_prompt(question=user_query, reference=FALLBACK_KNOWLEDGE_BASE)
+        response = ollama.generate(model="gemma2", prompt=prompt)
+        return response["response"]
 
     prompt = _build_answer_prompt(question=user_query, context=context)
     

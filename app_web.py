@@ -27,6 +27,11 @@ with st.sidebar:
     st.header("設定")
     llm_model = st.selectbox("回答モデル", ["gemma2", "llama3.1"], index=0)
     k = st.slider("検索の強さ（k値）", min_value=1, max_value=10, value=3, step=1)
+    allow_general_fallback = st.checkbox(
+        "資料の該当箇所が見つからない場合も、一般的な説明として回答する",
+        value=True,
+        help="参照PDFの該当箇所を特定できない場合に、一般的な説明として回答します（根拠の引用は表示されないことがあります）。",
+    )
     st.caption("埋め込みモデル: `nomic-embed-text`（固定 / 未導入なら `ollama pull nomic-embed-text`）")
     st.caption("PDFはサーバー側で `./pdfs/`（環境変数 `PDF_DIR`）に配置して利用します。")
     st.divider()
@@ -67,6 +72,40 @@ def _build_answer_prompt(*, question: str, context: str) -> str:
 
 【資料】:
 {context}
+
+質問: {question}
+""".strip()
+
+
+FALLBACK_KNOWLEDGE_BASE = """
+【プロトタイプ知識ベース（資料外・一般情報） 抜粋】
+- 観察期間：接種当日（0日目）から7日間
+- 記録項目：体温、接種部位の反応（腫れ・痛み）、全身反応（発熱、頭痛、倦怠感）
+- 報告が必要な症状：37.5度以上の発熱、日常生活に支障が出るほどの痛みや腫れ
+- 連絡先：各自治体の相談窓口、または接種を受けた医療機関
+""".strip()
+
+
+def _build_general_fallback_prompt(*, question: str, reference: str) -> str:
+    return f"""
+あなたは医療情報の文脈で回答するアシスタントです。
+現在、参照PDFから質問の該当箇所を特定できていません。
+そのため、以下の【参考情報】と一般的な注意として、断定を避けつつ回答してください。
+
+必ず次の3セクションだけで出力してください（見出し名は固定）:
+結論:
+根拠:
+相談先:
+
+ルール:
+- 参照PDFに基づくと断定しない（ページラベルの引用もしない）
+- 「根拠」には、【参考情報】からの引用/要約と、「一般的には…」のような前置きを使って不確実性を明示する
+- 医療判断（診断/治療の指示）をしない。迷う場合は相談先へ誘導する
+- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
+- 余計な追加セクション（注意/補足など）は出さない（UI側で常設するため）
+
+【参考情報】:
+{reference}
 
 質問: {question}
 """.strip()
@@ -555,7 +594,12 @@ if prompt:
 
                 # 根拠が取れない場合は、生成せずに固定フォーマットで返す（断定/hallucination防止）
                 if not sources:
-                    answer = _no_sources_answer(prompt)
+                    if allow_general_fallback:
+                        full_prompt = _build_general_fallback_prompt(question=prompt, reference=FALLBACK_KNOWLEDGE_BASE)
+                        response = ollama.generate(model=llm_model, prompt=full_prompt)
+                        answer = response["response"]
+                    else:
+                        answer = _no_sources_answer(prompt)
                 else:
                     full_prompt = _build_answer_prompt(question=prompt, context=context)
                     response = ollama.generate(model=llm_model, prompt=full_prompt)

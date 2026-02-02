@@ -112,6 +112,27 @@ function loadModel() {
   }
 }
 
+const ALLOW_FALLBACK_KEY = "allowFallback.v1";
+
+function saveAllowFallback(v) {
+  try {
+    localStorage.setItem(ALLOW_FALLBACK_KEY, v ? "1" : "0");
+  } catch {
+    /* noop */
+  }
+}
+
+function loadAllowFallbackDefaultTrue() {
+  try {
+    const raw = localStorage.getItem(ALLOW_FALLBACK_KEY);
+    if (raw === null || raw === undefined || raw === "") return true; // 既定は“返す”（ユーザー体験優先）
+    const v = String(raw).trim();
+    return v === "1" || v.toLowerCase() === "true" || v.toLowerCase() === "yes" || v.toLowerCase() === "on";
+  } catch {
+    return true;
+  }
+}
+
 const DIAG_UNSUPPORTED_KEY = "diagUnsupportedApiBases.v1";
 
 function loadDiagUnsupportedSet() {
@@ -839,6 +860,7 @@ function main() {
   const apiBaseEl = $("apiBase");
   const modelEl = $("model");
   const kEl = $("k");
+  const allowFallbackEl = document.getElementById("allowFallback");
   const promptEl = $("prompt");
   const sendBtn = $("send");
   const resendBtn = $("resend");
@@ -888,7 +910,8 @@ function main() {
     if (!settingsSummaryEl) return;
     const m = (modelEl && modelEl.value ? String(modelEl.value) : "").trim();
     const k = (kEl && kEl.value ? String(kEl.value) : "").trim();
-    settingsSummaryEl.textContent = `モデル: ${m || "未選択"} / k=${k || "?"}`;
+    const fb = allowFallbackEl ? (allowFallbackEl.checked ? "一般回答: ON" : "一般回答: OFF") : "";
+    settingsSummaryEl.textContent = `モデル: ${m || "未選択"} / k=${k || "?"}${fb ? " / " + fb : ""}`;
   }
 
   // /diagnostics が未実装のAPI（またはAPI以外）を指すと 404 が定期的に出るため、
@@ -1005,12 +1028,22 @@ function main() {
       }
     }
   }
+  // “資料にない”が続くケースを避けるため、既定はON（localStorageがあればそれを優先）
+  if (allowFallbackEl) {
+    allowFallbackEl.checked = loadAllowFallbackDefaultTrue();
+  }
   updateSettingsSummary();
 
   // 入力中にも要約を更新して、いま何を設定しているかが分かるようにする
   apiBaseEl.addEventListener("input", () => updateApiBaseSummary());
   kEl.addEventListener("input", () => updateSettingsSummary());
   kEl.addEventListener("change", () => updateSettingsSummary());
+  if (allowFallbackEl) {
+    allowFallbackEl.addEventListener("change", () => {
+      saveAllowFallback(allowFallbackEl.checked);
+      updateSettingsSummary();
+    });
+  }
 
   saveBtn.addEventListener("click", () => {
     if (sameOriginUi) return;
@@ -1515,6 +1548,7 @@ function main() {
         }
       })();
     const k = Number(kEl.value || 3);
+    const allowFallback = allowFallbackEl ? !!allowFallbackEl.checked : true;
     const p = String(prompt || "").trim();
     if (!sameOriginUi && !apiBase) {
       addMessage("error", "APIのURLを入力してください。", {
@@ -1551,7 +1585,21 @@ function main() {
     currentController = new AbortController();
 
     try {
-      const chatRes = await postChat({ apiBase, prompt: p, model, k, signal: currentController.signal });
+      const chatRes = await postJson(
+        `${apiBase}/chat`,
+        {
+          prompt: p,
+          model,
+          k,
+          max_tokens: 120,
+          timeout_s: 240,
+          embedding_timeout_s: 240,
+          search_timeout_s: 120,
+          generate_timeout_s: 240,
+          allow_general_fallback: allowFallback,
+        },
+        { signal: currentController.signal }
+      );
       const timings = Object.assign({}, chatRes.timings || {});
       if (typeof timings.total_ms !== "number") {
         const a = typeof timings.embedding_ms === "number" ? timings.embedding_ms : 0;
@@ -1561,7 +1609,9 @@ function main() {
       }
       const sources = chatRes && Array.isArray(chatRes.sources) ? chatRes.sources : null;
       const noSources = Array.isArray(sources) && sources.length === 0;
-      const actions = noSources
+      const ans = (chatRes && chatRes.answer) || "";
+      const looksLikeRefusal = noSources && /資料に記載がないため、この資料に基づく回答はできません/.test(String(ans));
+      const actions = looksLikeRefusal
         ? buildRewriteSuggestions(p).map((text) => ({
             label: `言い換え案: ${truncateText(text, 16)}`,
             kind: "secondary",
@@ -1571,7 +1621,7 @@ function main() {
             },
           }))
         : [];
-      addMessage("assistant", (chatRes && chatRes.answer) || "", {
+      addMessage("assistant", ans, {
         model,
         sources,
         timings,
