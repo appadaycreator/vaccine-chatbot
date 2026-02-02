@@ -243,7 +243,11 @@ function main() {
   const saveBtn = $("saveApiBase");
   const reloadBtn = $("reloadIndex");
   const sourcesStatusEl = $("sourcesStatus");
+  const sourcesIndexingEl = $("sourcesIndexing");
+  const sourcesErrorEl = $("sourcesError");
+  const sourcesNextActionsEl = $("sourcesNextActions");
   const sourcesListEl = $("sourcesList");
+  const guardEl = $("guard");
 
   apiBaseEl.value = loadApiBase();
   // M2 Mac mini (8GB) では軽量モデルをデフォルトにする
@@ -264,17 +268,68 @@ function main() {
       if (!data.ok) {
         sourcesStatusEl.textContent = `ソース一覧取得に失敗: ${data.error || ""}`;
         sourcesListEl.textContent = "";
-        return;
+        sourcesIndexingEl.textContent = "";
+        sourcesErrorEl.textContent = "";
+        sourcesNextActionsEl.textContent = "";
+        setGuard(true, "参照ソース情報を取得できませんでした（API Base URL を確認してください）。");
+        return null;
       }
       const indexed = typeof data.indexed === "boolean" ? data.indexed : null;
+      const indexing = data && data.indexing ? data.indexing : null;
+      const running = !!(indexing && indexing.running === true);
       const last = data.last_indexed_at ? ` / 最終: ${String(data.last_indexed_at)}` : "";
       sourcesStatusEl.textContent =
         indexed === null
           ? `登録済みソース: ${data.items.length} 件${last}`
           : `登録済みソース: ${data.items.length} 件（${indexed ? "インデックス済" : "未インデックス"}）${last}`;
+
+      // インデックス実行状況
+      if (running) {
+        const startedAt = indexing && indexing.started_at ? `開始: ${String(indexing.started_at)}` : "";
+        sourcesIndexingEl.textContent = `再インデックス実行中… ${startedAt}`;
+      } else {
+        sourcesIndexingEl.textContent = "";
+      }
+
+      // エラー表示（直近の index エラー or init_error）
+      const errObj = data.error || null;
+      const initErr = data.init_error ? String(data.init_error) : "";
+      if (errObj && typeof errObj === "object") {
+        const msg = errObj.message ? String(errObj.message) : JSON.stringify(errObj);
+        const hints =
+          Array.isArray(errObj.hints) && errObj.hints.length ? "\n対処:\n" + errObj.hints.map((x) => `- ${x}`).join("\n") : "";
+        sourcesErrorEl.innerHTML = escapeHtml(`${msg}${hints}`).replaceAll("\n", "<br>");
+      } else if (initErr) {
+        sourcesErrorEl.innerHTML = escapeHtml(initErr).replaceAll("\n", "<br>");
+      } else {
+        sourcesErrorEl.textContent = "";
+      }
+
+      // 次にやること
+      const next = Array.isArray(data.next_actions) ? data.next_actions : [];
+      sourcesNextActionsEl.innerHTML = next.length
+        ? escapeHtml("次にやること:\n- " + next.join("\n- ")).replaceAll("\n", "<br>")
+        : "";
+
+      // 送信ガード（未完了/実行中は送信不可）
+      if (running) {
+        setGuard(true, "インデックス実行中のため、完了するまで送信できません。");
+      } else if (indexed === false) {
+        if (!data.items || !data.items.length) {
+          setGuard(true, "PDFが未配置のため送信できません。上の「次にやること」を実施してください。");
+        } else {
+          setGuard(true, "インデックス未完了のため送信できません（必要に応じて「再インデックス」を実行）。");
+        }
+      } else {
+        setGuard(false, "");
+      }
+
+      // サーバー側が実行中なら、再インデックスボタンも抑止
+      reloadBtn.disabled = running;
+
       if (!data.items.length) {
         sourcesListEl.innerHTML = `<div class="muted small">（まだ登録されていません）</div>`;
-        return;
+        return data;
       }
       const rows = data.items
         .map((it) => {
@@ -286,6 +341,11 @@ function main() {
           const meta = [];
           if (showSaved) meta.push(`保存名: ${saved}`);
           if (it && typeof it.size_bytes === "number") meta.push(`${Math.round(it.size_bytes / 1024)}KB`);
+          if (it && it.ingest && typeof it.ingest === "object") {
+            const st = it.ingest.status ? String(it.ingest.status) : "";
+            if (st === "ocr_needed") meta.push("要OCR（テキスト抽出不可）");
+            if (st === "error") meta.push("取込失敗");
+          }
           const metaHtml = meta.length
             ? `<span class="muted small source-meta">（${escapeHtml(meta.join(" / "))}）</span>`
             : "";
@@ -293,9 +353,15 @@ function main() {
         })
         .join("");
       sourcesListEl.innerHTML = `<ul class="sources-list">${rows}</ul>`;
+      return data;
     } catch (e) {
       sourcesStatusEl.textContent = `ソース一覧取得に失敗: ${e && e.message ? e.message : String(e)}`;
       sourcesListEl.textContent = "";
+      sourcesIndexingEl.textContent = "";
+      sourcesErrorEl.textContent = "";
+      sourcesNextActionsEl.textContent = "";
+      setGuard(true, "参照ソース情報を取得できませんでした（API Base URL を確認してください）。");
+      return null;
     }
   }
 
@@ -305,20 +371,59 @@ function main() {
       setStatus("API Base URL を入力してください。", true);
       return;
     }
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    async function waitForIndexCompletion() {
+      let delay = 1500;
+      // 最大 10 分はポーリング（重いPDFでも自己解決できるように待つ）
+      const deadline = Date.now() + 10 * 60 * 1000;
+      while (Date.now() < deadline) {
+        const data = await refreshSources();
+        const running = !!(data && data.indexing && data.indexing.running === true);
+        if (!running) return data;
+        await sleep(delay);
+        delay = Math.min(Math.round(delay * 1.4), 8000);
+      }
+      return await refreshSources();
+    }
+
     const prevText = reloadBtn.textContent;
     reloadBtn.disabled = true;
     reloadBtn.textContent = "再インデックス中…";
     sourcesStatusEl.textContent = "再インデックス中…（しばらくお待ちください）";
     try {
-      await reloadIndex(apiBase);
-      setStatus("再インデックスが完了しました。");
-      await refreshSources();
+      const res = await reloadIndex(apiBase);
+      // 202 で「開始」なので、ここでは完了扱いしない
+      setStatus((res && res.message) || "再インデックスを開始しました。完了までお待ちください。");
+      const finalData = await waitForIndexCompletion();
+      if (finalData && finalData.indexed === true) {
+        setStatus("再インデックスが完了しました。");
+      } else if (finalData && finalData.error) {
+        const msg =
+          finalData.error && typeof finalData.error === "object" && finalData.error.message
+            ? String(finalData.error.message)
+            : "再インデックスに失敗しました（エラー内容を確認してください）。";
+        setStatus(msg, true);
+      }
     } catch (e) {
-      setStatus(`再インデックス失敗: ${e && e.message ? e.message : String(e)}`, true);
-      await refreshSources();
+      const msg = e && e.message ? e.message : String(e);
+      // 409: すでに実行中（サーバー側で多重実行防止）
+      if (String(msg).includes("HTTP 409")) {
+        setStatus("すでに再インデックスが実行中です。完了までお待ちください。", true);
+        await waitForIndexCompletion();
+      } else {
+        setStatus(`再インデックス失敗: ${msg}`, true);
+        await refreshSources();
+      }
     } finally {
-      reloadBtn.disabled = false;
-      reloadBtn.textContent = prevText || "再読み込み";
+      const d = await refreshSources();
+      const running = !!(d && d.indexing && d.indexing.running === true);
+      if (!running) {
+        reloadBtn.textContent = prevText || "再読み込み";
+      } else {
+        reloadBtn.textContent = "再インデックス中…";
+      }
+      // disabled は refreshSources() が（実行中なら）制御する
     }
   }
 
@@ -327,12 +432,26 @@ function main() {
   });
 
   let currentController = null;
+  let busy = false;
+  let guard = { blocked: false, reason: "" };
 
-  function setBusy(busy) {
-    sendBtn.disabled = !!busy;
-    promptEl.disabled = !!busy;
+  function updateComposerState() {
+    const blocked = !!busy || !!guard.blocked;
+    sendBtn.disabled = blocked;
+    promptEl.disabled = blocked;
     cancelBtn.hidden = !busy;
     cancelBtn.disabled = !busy;
+    guardEl.textContent = guard.blocked ? guard.reason : "";
+  }
+
+  function setBusy(v) {
+    busy = !!v;
+    updateComposerState();
+  }
+
+  function setGuard(blocked, reason) {
+    guard = { blocked: !!blocked, reason: blocked ? String(reason || "") : "" };
+    updateComposerState();
   }
 
   cancelBtn.addEventListener("click", () => {
@@ -349,6 +468,10 @@ function main() {
     const k = Number(kEl.value || 3);
     if (!apiBase) {
       setStatus("API Base URL を入力してください。", true);
+      return;
+    }
+    if (guard && guard.blocked) {
+      setStatus(guard.reason || "インデックス未完了のため送信できません。", true);
       return;
     }
     if (!prompt) return;

@@ -14,6 +14,7 @@
       </div>
       <div class="header__links">
         <a href="./" aria-label="reload">reload</a>
+        <a href="./tech.html">利用技術</a>
       </div>
     </header>
 
@@ -35,6 +36,15 @@
           GitHub Pages（HTTPS）からは <code>http://localhost:8000</code> へ直接アクセスできません（Mixed
           Content）。<br />
           <code>cloudflared tunnel --url http://localhost:8000</code> で発行される HTTPS URL を指定してください。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>免責（診断ではありません）</h2>
+        <p class="muted">
+          本ツールは、参照PDF（厚労省等の資料）の内容に基づく情報提供を目的としており、診断や治療の代替ではありません。<br />
+          体調が悪い・不安が強い場合は、接種を受けた医療機関またはお住まいの自治体の予防接種相談窓口に相談してください。<br />
+          呼吸が苦しい、意識がもうろう、症状が急に悪化した等の緊急性が疑われる場合は <strong>119（救急）</strong> を利用してください。
         </p>
       </section>
 
@@ -70,6 +80,9 @@
           <button id="reloadIndex" class="btn btn--secondary" type="button">再読み込み</button>
         </div>
         <div class="muted small" id="sourcesStatus"></div>
+        <div class="muted small" id="sourcesIndexing"></div>
+        <div class="muted small error" id="sourcesError"></div>
+        <div class="muted small" id="sourcesNextActions"></div>
         <div class="muted small" id="sourcesList"></div>
       </section>
 
@@ -77,6 +90,7 @@
         <h2>チャット</h2>
         <div id="messages" class="messages" aria-live="polite"></div>
         <div id="progress" class="muted small progress" aria-live="polite"></div>
+        <div id="guard" class="muted small error" aria-live="polite"></div>
         <form id="chatForm" class="composer">
           <input
             id="prompt"

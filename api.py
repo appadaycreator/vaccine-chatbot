@@ -4,6 +4,7 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -11,6 +12,7 @@ from typing import Any, Optional
 import ollama
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -31,6 +33,54 @@ DEFAULT_EMBEDDING_TIMEOUT_S = 180
 DEFAULT_SEARCH_TIMEOUT_S = 60
 DEFAULT_GENERATE_TIMEOUT_S = 180
 DEFAULT_CACHE_MAX_ENTRIES = 512
+
+# 回答品質（医療系の言い方）を最低ラインで保証するための固定フォーマット
+# - 断定・誤誘導を避けるため、根拠（sources）が取れない場合は必ず「資料にない」を返す
+# - ユーザーが次に取る行動（相談先）を必ず出す
+ANSWER_SECTIONS = ("結論", "根拠", "相談先")
+
+
+def _no_sources_answer(question: str) -> str:
+    q = (question or "").strip()
+    qline = f"（質問: {q}）" if q else ""
+    return (
+        "結論:\n"
+        "資料に記載がないため、この資料に基づく回答はできません。"
+        f"{qline}\n\n"
+        "根拠:\n"
+        "- 資料にない（参照PDFから該当箇所を特定できませんでした）\n\n"
+        "相談先:\n"
+        "- 接種を受けた医療機関\n"
+        "- お住まいの自治体の予防接種相談窓口\n"
+        "- 症状が強い／急に悪化した／緊急性が疑われる場合: 119（救急）\n"
+    )
+
+
+def _build_answer_prompt(*, question: str, context: str) -> str:
+    """
+    LLMに「結論/根拠/相談先」の構造を強制し、資料外の推測を抑止するテンプレ。
+    注意: sources が空のときは呼び出し側で生成せず _no_sources_answer を返す（DoD対策）。
+    """
+    return f"""
+あなたは医療情報の文脈で、厚労省等の配布資料（下の【資料】）に基づいて回答するアシスタントです。
+推測や一般論で補完してはいけません。【資料】に書かれていないことは「資料にない」と明確に述べてください。
+
+必ず次の3セクションだけで出力してください（見出し名は固定）:
+結論:
+根拠:
+相談先:
+
+ルール:
+- 【資料】に書かれていない内容を断定しない（曖昧にそれっぽく言わない）
+- 「根拠」には、【資料】から該当箇所をページラベル（例: [P3]）つきで引用/要約して箇条書きで示す
+- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
+- 余計な免責文や追加セクション（注意/補足など）は出さない（UI側で常設するため）
+
+【資料】:
+{context}
+
+質問: {question}
+""".strip()
 
 
 APP_STARTED_AT = datetime.now(tz=timezone.utc).isoformat()
@@ -117,6 +167,51 @@ class _LRUCache:
             "hits": self.hits,
             "misses": self.misses,
         }
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _init_index_status() -> dict[str, Any]:
+    return {
+        "running": False,
+        "run_id": None,
+        "trigger": None,  # startup / reload / auto
+        "started_at": None,
+        "finished_at": None,
+        "last_success_at": None,
+        "last_error": None,  # {"message": str, "code": str, "hints": [..], "at": iso, "items": [...]}
+        "last_report": None,  # {"items": [...], "summary": {...}}
+    }
+
+
+class IndexBuildError(RuntimeError):
+    def __init__(self, message: str, report: dict[str, Any]):
+        super().__init__(message)
+        self.report = report
+
+
+def _get_index_status() -> dict[str, Any]:
+    lock: threading.Lock | None = getattr(app.state, "index_status_lock", None)
+    if lock is None:
+        return dict(getattr(app.state, "index_status", _init_index_status()))
+    with lock:
+        return dict(getattr(app.state, "index_status", _init_index_status()))
+
+
+def _update_index_status(patch: dict[str, Any]) -> dict[str, Any]:
+    lock: threading.Lock | None = getattr(app.state, "index_status_lock", None)
+    if lock is None:
+        cur = getattr(app.state, "index_status", _init_index_status())
+        cur.update(patch)
+        app.state.index_status = cur
+        return dict(cur)
+    with lock:
+        cur = getattr(app.state, "index_status", _init_index_status())
+        cur.update(patch)
+        app.state.index_status = cur
+        return dict(cur)
 
 
 def _repo_root() -> str:
@@ -326,26 +421,121 @@ def _split_pdf_docs(pdf_path: str, source_label: str):
     return [c for c in chunks if (c.page_content or "").strip()]
 
 
-def _rebuild_vectorstore(paths: list[str], persist_dir: str) -> Chroma:
-    # 既存DBがある場合も、ソースが変わったら作り直す（重複/ゴミ混入を避ける）
-    _safe_reset_persist_dir(persist_dir)
+def _analyze_and_split_pdf(pdf_path: str) -> tuple[list[Any], dict[str, Any]]:
+    """
+    PDFを読み込み、チャンク化して返す。
+    併せて「テキスト抽出できたか（OCR不足か）」等のユーザー向け情報を返す。
+    """
+    loader = PyPDFLoader(pdf_path)
+    docs = loader.load()
+    pages = len(docs)
+    extracted_chars = 0
+    for d in docs:
+        extracted_chars += len((d.page_content or "").strip())
 
-    chunks = []
+    # source は表示用に basename を固定
+    source_label = os.path.basename(pdf_path)
+    for d in docs:
+        d.metadata = dict(d.metadata or {})
+        d.metadata["source"] = source_label
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    chunks = splitter.split_documents(docs)
+    chunks = [c for c in chunks if (c.page_content or "").strip()]
+    chunk_count = len(chunks)
+
+    ocr_needed = (pages > 0 and extracted_chars < 20) or chunk_count == 0
+    status = "ok"
+    hints: list[str] = []
+    if ocr_needed:
+        status = "ocr_needed"
+        hints = [
+            "スキャンPDFの場合はOCRして、テキスト入りのPDFにしてから配置してください",
+            "OCR後に POST /reload（UIの「再インデックス」）で再インデックスしてください",
+        ]
+
+    report = {
+        "status": status,
+        "pages": pages,
+        "extracted_chars": extracted_chars,
+        "chunk_count": chunk_count,
+        "hints": hints,
+    }
+    return chunks, report
+
+
+def _build_chunks_with_report(paths: list[str]) -> tuple[list[Any], list[dict[str, Any]], dict[str, Any]]:
+    chunks: list[Any] = []
+    items: list[dict[str, Any]] = []
+    summary = {
+        "pdf_total": len(paths),
+        "pdf_ok": 0,
+        "pdf_ocr_needed": 0,
+        "pdf_error": 0,
+        "chunks_total": 0,
+        "pages_total": 0,
+        "extracted_chars_total": 0,
+    }
     for p in paths:
+        base = {"path": os.path.abspath(p), "filename": os.path.basename(p)}
         if not os.path.exists(p):
+            items.append({**base, "status": "missing", "error": "ファイルが存在しません", "hints": ["PDFの配置先（PDF_DIR）を確認してください"]})
+            summary["pdf_error"] += 1
             continue
-        chunks.extend(_split_pdf_docs(p, os.path.basename(p)))
+        try:
+            ch, rep = _analyze_and_split_pdf(p)
+            items.append({**base, **rep})
+            summary["pages_total"] += int(rep.get("pages") or 0)
+            summary["extracted_chars_total"] += int(rep.get("extracted_chars") or 0)
+            summary["chunks_total"] += int(rep.get("chunk_count") or 0)
+            if rep.get("status") == "ok":
+                summary["pdf_ok"] += 1
+            elif rep.get("status") == "ocr_needed":
+                summary["pdf_ocr_needed"] += 1
+            else:
+                summary["pdf_error"] += 1
+            chunks.extend(ch)
+        except Exception as e:
+            items.append(
+                {
+                    **base,
+                    "status": "error",
+                    "error": str(e),
+                    "hints": ["PDFが壊れていないか確認してください", "スキャンPDFの場合はOCRしてから配置してください"],
+                }
+            )
+            summary["pdf_error"] += 1
+
+    return chunks, items, summary
+
+
+def _rebuild_vectorstore(paths: list[str], persist_dir: str) -> tuple[Chroma, dict[str, Any]]:
+    # 先にPDFを解析して「空/失敗」を判断（失敗した場合に既存DBを消さない）
+    chunks, report_items, summary = _build_chunks_with_report(paths)
+    report = {"items": report_items, "summary": summary}
 
     if not chunks:
-        raise RuntimeError(
-            "PDFが見つからない、またはPDFからテキストを抽出できませんでした。"
-            "（スキャンPDFの場合はOCRしてから配置してください）"
+        if not paths:
+            raise IndexBuildError(
+                "PDFが未配置です。./pdfs/（環境変数 PDF_DIR）にPDFを配置して、再インデックスしてください。",
+                report,
+            )
+        if summary.get("pdf_ocr_needed", 0) >= 1 and summary.get("extracted_chars_total", 0) < 20:
+            raise IndexBuildError(
+                "PDFは見つかりましたが、テキストを抽出できませんでした。スキャンPDFの可能性があります（OCRしてから配置してください）。",
+                report,
+            )
+        raise IndexBuildError(
+            "PDFは見つかりましたが、取り込みに失敗しました。PDFが壊れていないか、OCR済みかを確認してください。",
+            report,
         )
 
+    # 既存DBがある場合も、ソースが変わったら作り直す（重複/ゴミ混入を避ける）
+    _safe_reset_persist_dir(persist_dir)
     embeddings = OllamaEmbeddings(model=DEFAULT_EMBED_MODEL)
     vs = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=persist_dir)
     _persist_if_supported(vs)
-    return vs
+    return vs, report
 
 
 def _load_vectorstore(persist_dir: str) -> Chroma:
@@ -362,7 +552,7 @@ def _is_vectorstore_ready(vs: Chroma) -> bool:
     return False
 
 
-def _ensure_index_uptodate(force: bool = False) -> None:
+def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
     persist_dir = app.state.persist_dir
     pdf_path = app.state.pdf_path
     pdf_dir = app.state.pdf_dir
@@ -384,14 +574,80 @@ def _ensure_index_uptodate(force: bool = False) -> None:
         except Exception:
             pass
 
-    # 作り直し
-    app.state.vectorstore = _rebuild_vectorstore(paths, persist_dir)
-    app.state.source_signature = sig
-    app.state.last_indexed_at = datetime.now(tz=timezone.utc).isoformat()
-    _save_index_manifest(
-        persist_dir,
-        {"source_signature": sig, "last_indexed_at": app.state.last_indexed_at, "pdf_path": pdf_path, "pdf_dir": pdf_dir},
+    run_id = int(time.time() * 1000)
+    _update_index_status(
+        {
+            "running": True,
+            "run_id": run_id,
+            "trigger": trigger,
+            "started_at": _utc_now_iso(),
+            "finished_at": None,
+            "last_error": None,
+        }
     )
+
+    try:
+        prev_sig = getattr(app.state, "source_signature", None)
+
+        # 作り直し（失敗時に既存DBを維持できるよう、_rebuild_vectorstore 側で先に解析する）
+        vs, report = _rebuild_vectorstore(paths, persist_dir)
+        app.state.vectorstore = vs
+        app.state.source_signature = sig
+        app.state.last_indexed_at = _utc_now_iso()
+        app.state.init_error = None
+        _update_index_status(
+            {
+                "running": False,
+                "finished_at": _utc_now_iso(),
+                "last_success_at": app.state.last_indexed_at,
+                "last_report": report,
+                "last_error": None,
+            }
+        )
+        _save_index_manifest(
+            persist_dir,
+            {
+                "source_signature": sig,
+                "last_indexed_at": app.state.last_indexed_at,
+                "pdf_path": pdf_path,
+                "pdf_dir": pdf_dir,
+                "index_status": _get_index_status(),
+            },
+        )
+    except Exception as e:
+        # 失敗時は、既存の vectorstore / signature をなるべく維持する（途中で消していない想定）
+        app.state.init_error = str(e)
+        report = e.report if isinstance(e, IndexBuildError) else None
+        _update_index_status(
+            {
+                "running": False,
+                "finished_at": _utc_now_iso(),
+                "last_report": report,
+                "last_error": {
+                    "message": str(e),
+                    "code": "INDEX_BUILD_FAILED",
+                    "hints": [
+                        "PDFを ./pdfs/（環境変数 PDF_DIR）に配置してください",
+                        "スキャンPDFの場合はOCRしてから配置してください",
+                        "PDFを追加・更新したら POST /reload で再インデックスしてください",
+                    ],
+                    "at": _utc_now_iso(),
+                    "report": report,
+                },
+            }
+        )
+        _save_index_manifest(
+            persist_dir,
+            {
+                "source_signature": getattr(app.state, "source_signature", prev_sig),
+                "last_indexed_at": getattr(app.state, "last_indexed_at", None),
+                "pdf_path": pdf_path,
+                "pdf_dir": pdf_dir,
+                "index_status": _get_index_status(),
+            },
+        )
+        # 例外は上位へ（/reload などでエラー表示できるように）
+        raise
 
 
 @app.on_event("startup")
@@ -415,6 +671,8 @@ async def _startup() -> None:
     app.state.source_signature = None
     app.state.last_indexed_at = None
     app.state.last_request_timings = None
+    app.state.index_status_lock = threading.Lock()
+    app.state.index_status = _init_index_status()
     app.state.embeddings = OllamaEmbeddings(model=DEFAULT_EMBED_MODEL)
     cache_max = int(os.environ.get("EMBED_CACHE_MAX", str(DEFAULT_CACHE_MAX_ENTRIES)))
     app.state.embedding_cache = _LRUCache(max_entries=cache_max)
@@ -426,12 +684,15 @@ async def _startup() -> None:
         if isinstance(m, dict) and "source_signature" in m:
             app.state.source_signature = m.get("source_signature")
             app.state.last_indexed_at = m.get("last_indexed_at")
+        if isinstance(m, dict) and isinstance(m.get("index_status"), dict):
+            # 起動後に /sources で理由を出せるよう、前回の情報を引き継ぐ
+            _update_index_status(m.get("index_status"))
     except Exception:
         pass
 
     # 起動時にベクトルDBを準備（失敗しても落とさず /status に理由を出す）
     try:
-        _ensure_index_uptodate(force=False)
+        _ensure_index_uptodate(force=False, trigger="startup")
     except Exception as e:
         app.state.init_error = str(e)
 
@@ -504,6 +765,7 @@ def status() -> dict[str, Any]:
         "pdf_count": len(pdfs),
         "last_indexed_at": getattr(app.state, "last_indexed_at", None),
         "init_error": getattr(app.state, "init_error", None),
+        "indexing": _get_index_status(),
         "embed_model": DEFAULT_EMBED_MODEL,
         "embed_warmup": getattr(app.state, "embed_warmup", None),
         "embedding_cache": getattr(app.state, "embedding_cache", _LRUCache(DEFAULT_CACHE_MAX_ENTRIES)).stats(),
@@ -520,8 +782,19 @@ def list_sources() -> dict[str, Any]:
     paths = _list_pdf_paths(pdf_path, pdf_dir)
     sig = _source_signature(paths)
 
+    index_status = _get_index_status()
+    report = index_status.get("last_report") or {}
+    report_items = report.get("items") if isinstance(report, dict) else None
+    report_map: dict[str, Any] = {}
+    if isinstance(report_items, list):
+        for it in report_items:
+            if isinstance(it, dict) and isinstance(it.get("path"), str):
+                report_map[it["path"]] = it
+
     items: list[dict[str, Any]] = []
     for s in sig:
+        p = s.get("path")
+        rep = report_map.get(p) if isinstance(p, str) else None
         items.append(
             {
                 "type": "pdf",
@@ -530,16 +803,48 @@ def list_sources() -> dict[str, Any]:
                 "path": s.get("path"),
                 "size_bytes": s.get("size_bytes"),
                 "mtime": s.get("mtime"),
+                "ingest": rep,
             }
         )
 
     indexed_sig = getattr(app.state, "source_signature", None)
-    indexed = bool(app.state.vectorstore is not None and indexed_sig == sig)
+    running = bool(index_status.get("running") is True)
+    indexed = bool(app.state.vectorstore is not None and indexed_sig == sig and (not running))
+
+    next_actions: list[str] = []
+    if not items:
+        next_actions = [
+            f"PDFを {pdf_dir}/（環境変数 PDF_DIR）に配置してください（*.pdf）",
+            "配置後に「再インデックス」（POST /reload）を実行してください",
+            "スキャンPDFの場合はOCRしてテキスト入りPDFにしてから配置してください",
+        ]
+    else:
+        if running:
+            next_actions = ["インデックス実行中です。完了までお待ちください（実行中は送信できません）。"]
+        else:
+            any_ocr = any(
+                isinstance(x, dict)
+                and isinstance(x.get("ingest"), dict)
+                and x["ingest"].get("status") == "ocr_needed"
+                for x in items
+            )
+            if any_ocr:
+                next_actions.append("一部PDFでテキスト抽出できていません（スキャンPDFの可能性）。OCRしてから再インデックスしてください。")
+            if not indexed:
+                next_actions.append("PDFを追加・更新した場合は「再インデックス」（POST /reload）を実行してください。")
+
     return {
         "ok": True,
         "indexed": indexed,
+        "indexing": index_status,
         "last_indexed_at": getattr(app.state, "last_indexed_at", None),
         "persist_dir": persist_dir,
+        "pdf_path": pdf_path,
+        "pdf_dir": pdf_dir,
+        "legacy_pdf_dir": LEGACY_PDF_DIR,
+        "init_error": getattr(app.state, "init_error", None),
+        "error": index_status.get("last_error"),
+        "next_actions": next_actions,
         "items": items,
     }
 
@@ -547,13 +852,52 @@ def list_sources() -> dict[str, Any]:
 @app.post("/reload")
 async def reload_sources() -> dict[str, Any]:
     lock: asyncio.Lock = app.state.ingest_lock
-    async with lock:
-        try:
-            await asyncio.to_thread(_ensure_index_uptodate, True)
-            return {"ok": True, "reindexed": True, "last_indexed_at": getattr(app.state, "last_indexed_at", None)}
-        except Exception as e:
-            app.state.init_error = str(e)
-            raise HTTPException(status_code=500, detail=str(e))
+
+    # 多重実行は待たずに拒否（UIからも分かるように running を返す）
+    if lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "accepted": False,
+                "running": True,
+                "indexing": _get_index_status(),
+                "message": "すでに再インデックスが実行中です。",
+            },
+        )
+
+    # 非同期で受け付け（UIは /sources をポーリングして状態を見る）
+    run_id = int(time.time() * 1000)
+    _update_index_status(
+        {
+            "running": True,
+            "run_id": run_id,
+            "trigger": "reload",
+            "started_at": _utc_now_iso(),
+            "finished_at": None,
+            "last_error": None,
+        }
+    )
+
+    async def _task():
+        async with lock:
+            try:
+                await asyncio.to_thread(_ensure_index_uptodate, True, "reload")
+            except Exception:
+                # 失敗内容は _ensure_index_uptodate 側で index_status / init_error に記録される
+                pass
+
+    app.state.index_task = asyncio.create_task(_task())
+    return JSONResponse(
+        status_code=202,
+        content={
+            "ok": True,
+            "accepted": True,
+            "running": True,
+            "indexing": _get_index_status(),
+            "message": "再インデックスを開始しました。完了までしばらくお待ちください。",
+        },
+    )
 
 
 def _resolve_timeouts(
@@ -638,9 +982,18 @@ async def _embed_query_with_cache(prompt: str, timeout_s: int) -> tuple[list[flo
 async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_timeout_s: int) -> dict[str, Any]:
     # PDF配置の変更があれば自動追従（重い処理なので排他）
     lock: asyncio.Lock = app.state.ingest_lock
+    if lock.locked() and bool(_get_index_status().get("running") is True):
+        _http_error(
+            stage="search",
+            code="INDEXING_IN_PROGRESS",
+            message="インデックス処理が実行中のため、いまは回答できません",
+            hints=["インデックス完了を待ってから再送してください", "UIの「参照ソース（PDF一覧）」で実行状況とエラー内容を確認できます"],
+            extra={"indexing": _get_index_status()},
+            status_code=503,
+        )
     async with lock:
         try:
-            await asyncio.to_thread(_ensure_index_uptodate, False)
+            await asyncio.to_thread(_ensure_index_uptodate, False, "auto")
             app.state.init_error = None
         except Exception as e:
             app.state.vectorstore = None
@@ -760,17 +1113,11 @@ async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_time
 
 async def _run_generate(prompt: str, context: str, model: str, max_tokens: int, generate_timeout_s: int) -> dict[str, Any]:
     t0 = time.perf_counter()
-    full_prompt = f"""
-あなたは厚労省の資料に基づいて回答する専門アシスタントです。
-以下の【資料】の内容に基づいて、日本語で簡潔に回答してください。
-資料に記載がない場合は「資料内には該当する情報が見当たりません」と答え、自治体の相談窓口または接種を受けた医療機関への相談を促してください。
+    # context が空のときは、生成せずに固定フォーマットで返す（断定/hallucination防止）
+    if not (context or "").strip():
+        return {"answer": _no_sources_answer(prompt), "timings": {"generate_ms": int((time.perf_counter() - t0) * 1000)}}
 
-【資料】:
-{context}
-
-質問: {prompt}
-回答:
-""".strip()
+    full_prompt = _build_answer_prompt(question=prompt, context=context)
     try:
         response = await asyncio.wait_for(
             asyncio.to_thread(
@@ -863,6 +1210,15 @@ async def chat_endpoint(request: ChatRequest):
         docs = search_res["docs"]
         context = search_res["context"]
         timings = dict(search_res["timings"])
+        sources = _extract_sources(docs)
+
+        # sources が取れない（=根拠0件）場合は、生成せずに「資料にない」を固定フォーマットで返す（DoD対策）
+        if not sources:
+            answer = _no_sources_answer(request.prompt)
+            timings["generate_ms"] = 0
+            timings["total_ms"] = int((timings.get("embedding_ms", 0) + timings.get("search_ms", 0)))
+            app.state.last_request_timings = {"stage": "chat", **timings}
+            return {"answer": answer, "sources": [], "timings": timings}
 
         gen_res = await _run_generate(
             prompt=request.prompt,
@@ -890,7 +1246,7 @@ async def chat_endpoint(request: ChatRequest):
             )
         except Exception:
             pass
-        return {"answer": gen_res["answer"], "sources": _extract_sources(docs), "timings": timings}
+        return {"answer": gen_res["answer"], "sources": sources, "timings": timings}
     except HTTPException:
         raise
     except Exception as e:

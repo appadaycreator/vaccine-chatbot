@@ -12,6 +12,13 @@ st.set_page_config(page_title="ワクチン接種後健康観察アシスタン�
 st.title("🏥 健康観察アシスタント")
 st.caption("厚労省の実施要領に基づいたプロトタイプ")
 
+# 免責（UIに常設）＋相談導線
+st.info(
+    "このツールは資料に基づく情報提供を目的としており、診断や治療の代替ではありません。\n"
+    "体調が悪い・不安が強い場合は、接種を受けた医療機関や自治体の予防接種相談窓口に相談してください。\n"
+    "緊急性が疑われる場合（呼吸が苦しい、意識がもうろう等）は 119（救急）を利用してください。"
+)
+
 # サイドバー（設定）
 with st.sidebar:
     st.header("設定")
@@ -19,6 +26,45 @@ with st.sidebar:
     k = st.slider("検索の強さ（k値）", min_value=1, max_value=10, value=3, step=1)
     st.caption("埋め込みモデル: `nomic-embed-text`（固定）")
     st.caption("PDFはサーバー側で `./pdfs/`（環境変数 `PDF_DIR`）に配置して利用します。")
+
+
+def _no_sources_answer(question: str) -> str:
+    q = (question or "").strip()
+    qline = f"（質問: {q}）" if q else ""
+    return (
+        "結論:\n"
+        "資料に記載がないため、この資料に基づく回答はできません。"
+        f"{qline}\n\n"
+        "根拠:\n"
+        "- 資料にない（参照PDFから該当箇所を特定できませんでした）\n\n"
+        "相談先:\n"
+        "- 接種を受けた医療機関\n"
+        "- お住まいの自治体の予防接種相談窓口\n"
+        "- 症状が強い／急に悪化した／緊急性が疑われる場合: 119（救急）\n"
+    )
+
+
+def _build_answer_prompt(*, question: str, context: str) -> str:
+    return f"""
+あなたは医療情報の文脈で、厚労省等の配布資料（下の【資料】）に基づいて回答するアシスタントです。
+推測や一般論で補完してはいけません。【資料】に書かれていないことは「資料にない」と明確に述べてください。
+
+必ず次の3セクションだけで出力してください（見出し名は固定）:
+結論:
+根拠:
+相談先:
+
+ルール:
+- 【資料】に書かれていない内容を断定しない（曖昧にそれっぽく言わない）
+- 「根拠」には、【資料】から該当箇所を引用/要約して箇条書きで示す
+- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
+- 余計な免責文や追加セクション（注意/補足など）は出さない（UI側で常設するため）
+
+【資料】:
+{context}
+
+質問: {question}
+""".strip()
 
 
 def _normalize_docs_source(docs, source_label: str):
@@ -155,21 +201,14 @@ if prompt := st.chat_input("質問をどうぞ"):
             docs = vectorstore.similarity_search(prompt, k=k)
             context = "\n".join([doc.page_content for doc in docs])
             sources = _extract_sources(docs)
-            
-            # 生成
-            full_prompt = f"""
-あなたは厚労省の資料に基づいて回答する専門アシスタントです。
-以下の【資料抜粋】の内容に基づいて、日本語で簡潔に回答してください。
-資料に記載がない場合は「資料内には該当する情報が見当たりません」と答え、自治体の相談窓口または接種を受けた医療機関への相談を促してください。
 
-【資料抜粋】
-{context}
-
-質問: {prompt}
-回答:
-""".strip()
-            response = ollama.generate(model=llm_model, prompt=full_prompt)
-            answer = response['response']
+            # 根拠が取れない場合は、生成せずに固定フォーマットで返す（断定/hallucination防止）
+            if not sources:
+                answer = _no_sources_answer(prompt)
+            else:
+                full_prompt = _build_answer_prompt(question=prompt, context=context)
+                response = ollama.generate(model=llm_model, prompt=full_prompt)
+                answer = response["response"]
             
             st.markdown(answer)
             if sources:

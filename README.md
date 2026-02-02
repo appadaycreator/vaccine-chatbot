@@ -2,6 +2,20 @@
 
 Ollama（ローカルLLM）とRAG（PDF検索）で、厚労省資料に基づいた質問応答を行うプロトタイプです。
 
+## 回答品質の下限（医療系としての“言い方”と根拠の強制）
+
+本プロジェクトは、**断定・誤誘導・根拠不明回答を減らす**ため、回答の構造を固定しています（横展開: **API / Streamlit**）。
+
+- **回答フォーマット固定**: つねに `結論 / 根拠 / 相談先` の3セクションで返します
+- **根拠が取れない場合は必ず「資料にない」**: `sources` が空（=参照PDFから該当箇所が取れない）場合は、LLM生成を行わず固定文を返します
+- **次の行動（相談先）を必ず提示**: 相談先（医療機関・自治体窓口・緊急時の119）を必ず含めます
+- **免責と相談導線の常設（UI）**: GitHub Pages（`docs/`）と Streamlit で「診断ではない」旨を常設表示します
+
+## 利用技術（システム構成）
+
+- **GitHub（リポジトリ上）**: `docs/tech.html`
+- **GitHub Pages（配信）**: Pages のURL配下の `tech.html`（例: `.../tech.html`）
+
 ## 前提
 
 - macOS
@@ -154,9 +168,15 @@ cloudflared tunnel --url http://localhost:8000
 配置後の反映:
 
 - 自動: 次回の `/chat` 実行時に、PDFの増減/更新を検知して自動で再インデックスします
-- 手動: `POST /reload` で強制的に再インデックスできます
+- 手動: `POST /reload` で再インデックスを開始できます（**非同期**で受け付けます）
+  - すでに実行中の場合は **409**（多重実行防止）
+  - 実行状況は `GET /sources` の `indexing.running` で確認できます
 
-一覧: `GET /sources`
+一覧/状態: `GET /sources`
+  - `indexed`: インデックス完了（UIは未完了だと送信不可）
+  - `indexing.running`: 実行中フラグ（少なくとも「実行中か」をユーザーに見える形で提示）
+  - `error` / `next_actions`: 失敗理由（OCR不足など）と「次にやること」
+  - `items[].ingest`: PDFごとの取り込み状況（`ok` / `ocr_needed` / `error`）
 
 ## 常時稼働（Mac miniを「止まらないサーバー」にする）
 
@@ -216,11 +236,15 @@ curl -sS http://127.0.0.1:8000/status
 
 - `GET /health`: ヘルスチェック
 - `GET /status`: 状態確認（PDF数、初期化エラー、timings、embeddingウォームアップ/キャッシュなど）
-- `GET /sources`: 参照するPDF一覧
-- `POST /reload`: PDFを再インデックス（強制）
+- `GET /sources`: 参照PDF一覧＋インデックス状態（実行中/最終成功/エラー/次にやること）
+- `POST /reload`: 再インデックス開始（非同期。実行中は409で多重実行防止）
 - `POST /search`: 検索（embedding → 類似検索）
 - `POST /generate`: 生成（LLM応答）
 - `POST /chat`: 検索＋生成（フロントの既定ルート。内部的には `/search`→`/generate` 相当）
+
+補足:
+
+- 再インデックス実行中（`GET /sources` の `indexing.running=true`）は、`/chat` は **503** を返します（待たされずに「いま答えられない理由」が分かるようにするため）
 
 `POST /chat` の例:
 

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>利用技術・システム構成 | vaccine-chatbot</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="header__title">
+        <h1>利用技術・システム構成</h1>
+        <p class="muted">vaccine-chatbot の技術スタックと役割（運用前提も含む）</p>
+      </div>
+      <div class="header__links">
+        <a href="./">チャットUI</a>
+        <a href="./tech.html" aria-current="page">利用技術</a>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="card">
+        <h2>全体像</h2>
+        <p class="muted">
+          ローカルLLM（Ollama）と RAG（PDF→ベクトル検索）を組み合わせ、厚労省資料に基づく回答を返すプロトタイプです。
+          フロント（GitHub Pages）からは、HTTPS で公開した API（FastAPI）に対して <code>/chat</code> を呼び出します。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>バックエンド（API）</h2>
+        <ul class="muted">
+          <li><code>Python</code>: 3.10+（推奨: 3.13）</li>
+          <li><code>FastAPI</code>: HTTP API（<code>GET /status</code>, <code>POST /chat</code> など）</li>
+          <li><code>uvicorn</code>: ASGI サーバー（開発は <code>--reload</code>）</li>
+          <li><code>CORS</code>: GitHub Pages からのアクセスを許可（現状は <code>allow_origins=["*"]</code>）</li>
+        </ul>
+        <p class="muted small">
+          APIバージョン: <code>0.2.0</code><br />
+          API の主なエンドポイント: <code>/health</code>, <code>/status</code>, <code>/sources</code>, <code>/reload</code>,
+          <code>/search</code>, <code>/generate</code>, <code>/chat</code>
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>LLM / Embedding（ローカル推論）</h2>
+        <ul class="muted">
+          <li><code>Ollama</code>: ローカルLLM実行基盤（生成と embedding の両方）</li>
+          <li><strong>生成モデル（例）</strong>: <code>gemma2:2b</code>, <code>gemma2</code>, <code>llama3.1</code></li>
+          <li><strong>Embeddingモデル</strong>: <code>nomic-embed-text</code></li>
+        </ul>
+        <p class="muted small">
+          初回の遅さ対策として、API起動時に embedding を軽くウォームアップします（失敗しても API は落としません）。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>RAG（PDF取り込み・検索）</h2>
+        <ul class="muted">
+          <li><code>LangChain</code>: PDF読み込み/分割、ベクトル検索の統合</li>
+          <li><code>PyPDFLoader</code>: PDF→テキスト抽出（スキャンPDFはOCRが必要な場合あり）</li>
+          <li><code>RecursiveCharacterTextSplitter</code>: チャンク分割</li>
+          <li><code>ChromaDB</code>: ベクトルDB（永続化ディレクトリ: 既定 <code>./chroma_db</code>）</li>
+        </ul>
+        <p class="muted small">
+          PDFは <code>./pdfs</code>（環境変数 <code>PDF_DIR</code>）に配置します。追加/更新後は <code>POST /reload</code> で再インデックスできます。
+          スキャンPDFでテキスト抽出できない場合は「要OCR」として案内されます。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>フロントエンド（GitHub Pages）</h2>
+        <ul class="muted">
+          <li><code>docs/index.html</code> + <code>docs/app.js</code> + <code>docs/style.css</code>: 静的チャットUI</li>
+          <li>ブラウザから <code>POST /chat</code> を呼び出し、根拠（参照ページ）や timings を表示</li>
+          <li>API Base URL は <code>localStorage</code> または <code>?api=...</code> で指定</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>公開/運用（例）</h2>
+        <ul class="muted">
+          <li><code>cloudflared</code>: ローカルAPIを HTTPS で公開（GitHub Pages から Mixed Content にならないようにする）</li>
+          <li><code>launchd</code>（macOS）: uvicorn をログイン/再起動後に自動起動（テンプレ: <code>launchd/com.vaccine.api.plist</code>）</li>
+        </ul>
+        <p class="muted small">
+          Quick Tunnel はURLが変わるため、常時稼働は named tunnel が推奨です（README参照）。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>主要ライブラリ（requirements.txt）</h2>
+        <ul class="muted">
+          <li><code>ollama==0.6.1</code></li>
+          <li><code>langchain-community==0.4.1</code></li>
+          <li><code>langchain-text-splitters==1.1.0</code></li>
+          <li><code>chromadb==1.4.1</code></li>
+          <li><code>pypdf==6.6.2</code></li>
+          <li><code>fastapi==0.117.1</code></li>
+          <li><code>uvicorn[standard]==0.40.0</code></li>
+          <li><code>streamlit==1.53.1</code>（別UI/デモ用）</li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>
+
