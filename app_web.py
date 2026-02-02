@@ -281,20 +281,51 @@ def _is_embedding_model_missing_error(e: Exception, model: str = "nomic-embed-te
 @st.cache_resource(show_spinner=False)
 def _build_vectorstore_from_paths(paths: list[str], signature: str):
     # signature はキャッシュキー安定化のため
-    chunks = []
+    chunks: list = []
+    ingest_items: list[dict] = []
     splitter = _get_splitter()
     for p in paths:
         docs, loader_used = _load_pdf_docs_best_effort(p)
         docs = _normalize_docs_source(docs, os.path.basename(p))
+        extracted_chars = 0
         for d in docs:
             d.metadata = dict(d.metadata or {})
             d.metadata["loader"] = loader_used
             d.page_content = _clean_pdf_text(getattr(d, "page_content", "") or "")
+            extracted_chars += len((d.page_content or "").strip())
         _strip_repeated_header_footer(docs)
-        chunks.extend([c for c in splitter.split_documents(docs) if (c.page_content or "").strip()])
+        part = [c for c in splitter.split_documents(docs) if (c.page_content or "").strip()]
+        chunks.extend(part)
+        ingest_items.append(
+            {
+                "filename": os.path.basename(p),
+                "path": os.path.abspath(p),
+                "pages": len(docs),
+                "extracted_chars": extracted_chars,
+                "chunk_count": len(part),
+                "loader": loader_used,
+            }
+        )
+
+    extracted_total = sum(int(it.get("extracted_chars") or 0) for it in ingest_items)
+    chunk_total = len(chunks)
+    if chunk_total == 0 or extracted_total < 20:
+        raise RuntimeError(
+            "PDFは見つかりましたが、テキストを抽出できませんでした（スキャンPDFでOCR不足の可能性）。\n"
+            "この状態だと検索結果が常に0件になり、すべての質問で「資料にない」と返ります。\n"
+            "対処:\n"
+            "- OCRしてテキスト入りPDFにしてから配置してください\n"
+            "- 可能なら抽出精度が上がる場合があります: `pip install pymupdf` → `export PDF_LOADER=pymupdf`"
+        )
+
     _ensure_embedding_model("nomic-embed-text")
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
-    return Chroma.from_documents(documents=chunks, embedding=embeddings)
+    return Chroma.from_documents(documents=chunks, embedding=embeddings), {
+        "pdf_count": len(paths),
+        "extracted_chars_total": extracted_total,
+        "chunks_total": chunk_total,
+        "items": ingest_items,
+    }
 
 
 def _list_pdf_paths() -> list[str]:
@@ -339,8 +370,15 @@ try:
         st.stop()
     sig = _signature(paths)
     with st.spinner("PDFを解析して知識ベースを構築中...（初回は時間がかかります）"):
-        vectorstore = _build_vectorstore_from_paths(paths, sig)
-    st.success(f"資料の読み込みが完了しました（{len(paths)}件）。")
+        vectorstore, ingest = _build_vectorstore_from_paths(paths, sig)
+    st.success(
+        f"資料の読み込みが完了しました（{len(paths)}件 / pages合計 {sum(int((it or {}).get('pages') or 0) for it in (ingest or {}).get('items', []))} / チャンク {int((ingest or {}).get('chunks_total') or 0)}）。"
+    )
+    with st.expander("取り込み状況（PDFごとの統計）"):
+        for it in (ingest or {}).get("items", []):
+            st.markdown(
+                f"- **{it.get('filename')}**: pages={it.get('pages')} / extracted_chars={it.get('extracted_chars')} / chunks={it.get('chunk_count')} / loader={it.get('loader')}"
+            )
 except Exception as e:
     if _is_embedding_model_missing_error(e, "nomic-embed-text"):
         st.error(
