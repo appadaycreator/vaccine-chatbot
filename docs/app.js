@@ -116,6 +116,22 @@ async function getSources(apiBase) {
   return body;
 }
 
+async function reloadIndex(apiBase) {
+  const res = await fetch(`${apiBase}/reload`, { method: "POST" });
+  const bodyText = await res.text();
+  let body;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    body = { raw: bodyText };
+  }
+  if (!res.ok) {
+    const detail = body && body.detail ? body.detail : bodyText;
+    throw new Error(`HTTP ${res.status}: ${detail}`);
+  }
+  return body;
+}
+
 function setStatus(text, isError = false) {
   const root = $("messages");
   const p = document.createElement("div");
@@ -131,6 +147,7 @@ function main() {
   const kEl = $("k");
   const promptEl = $("prompt");
   const saveBtn = $("saveApiBase");
+  const reloadBtn = $("reloadIndex");
   const sourcesStatusEl = $("sourcesStatus");
   const sourcesListEl = $("sourcesList");
 
@@ -156,10 +173,11 @@ function main() {
         return;
       }
       const indexed = typeof data.indexed === "boolean" ? data.indexed : null;
+      const last = data.last_indexed_at ? ` / 最終: ${String(data.last_indexed_at)}` : "";
       sourcesStatusEl.textContent =
         indexed === null
-          ? `登録済みソース: ${data.items.length} 件`
-          : `登録済みソース: ${data.items.length} 件（${indexed ? "インデックス済" : "未インデックス"}）`;
+          ? `登録済みソース: ${data.items.length} 件${last}`
+          : `登録済みソース: ${data.items.length} 件（${indexed ? "インデックス済" : "未インデックス"}）${last}`;
       if (!data.items.length) {
         sourcesListEl.innerHTML = `<div class="muted small">（まだ登録されていません）</div>`;
         return;
@@ -186,6 +204,33 @@ function main() {
       sourcesListEl.textContent = "";
     }
   }
+
+  async function runReload() {
+    const apiBase = normalizeApiBase(apiBaseEl.value);
+    if (!apiBase) {
+      setStatus("API Base URL を入力してください。", true);
+      return;
+    }
+    const prevText = reloadBtn.textContent;
+    reloadBtn.disabled = true;
+    reloadBtn.textContent = "再インデックス中…";
+    sourcesStatusEl.textContent = "再インデックス中…（しばらくお待ちください）";
+    try {
+      await reloadIndex(apiBase);
+      setStatus("再インデックスが完了しました。");
+      await refreshSources();
+    } catch (e) {
+      setStatus(`再インデックス失敗: ${e && e.message ? e.message : String(e)}`, true);
+      await refreshSources();
+    } finally {
+      reloadBtn.disabled = false;
+      reloadBtn.textContent = prevText || "再読み込み";
+    }
+  }
+
+  reloadBtn.addEventListener("click", () => {
+    runReload();
+  });
 
   $("chatForm").addEventListener("submit", async (e) => {
     e.preventDefault();

@@ -62,6 +62,13 @@
           APIサーバー側で <code>PDF_DIR</code>（既定: <code>./pdfs</code>）に置かれたPDFを参照します。
           反映が必要な場合はAPIの <code>/reload</code> で再インデックスできます。
         </p>
+        <div class="row">
+          <label for="reloadIndex">再インデックス</label>
+          <div class="muted small">
+            PDFを追加・更新したあとに反映が遅い場合は、ここから強制的に再インデックスできます。
+          </div>
+          <button id="reloadIndex" class="btn btn--secondary" type="button">再読み込み</button>
+        </div>
         <div class="muted small" id="sourcesStatus"></div>
         <div class="muted small" id="sourcesList"></div>
       </section>
