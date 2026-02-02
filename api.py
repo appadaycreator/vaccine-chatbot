@@ -2571,7 +2571,8 @@ async def diagnostics(model: str | None = None) -> dict[str, Any]:
 
     # タイムアウトは短め（UIが固まらないように）
     # - ただし 3秒は「初回起動/高負荷」で誤判定（タイムアウト）になりやすいので、既定は少し緩める
-    ping_timeout_s = float(os.environ.get("DIAG_PING_TIMEOUT_S", "1.2"))
+    # この値は “Ollama が生きているのにタイムアウト扱い” を避けるため、やや余裕を持たせる。
+    ping_timeout_s = float(os.environ.get("DIAG_PING_TIMEOUT_S", "2.5"))
     list_timeout_s = float(os.environ.get("DIAG_LIST_TIMEOUT_S", "8.0"))
     embed_timeout_s = float(os.environ.get("DIAG_EMBED_TIMEOUT_S", "8.0"))
 

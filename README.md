@@ -399,7 +399,7 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
   - `pypdf`: `PyPDFLoader` を強制
 - `CHUNK_SIZE`: PDFチャンクサイズ（既定: `900`）
 - `CHUNK_OVERLAP`: PDFチャンクの重なり（既定: `120`）
-- `DIAG_PING_TIMEOUT_S`: 環境チェック（`GET /diagnostics`）の **Ollama疎通（/api/version）** のタイムアウト秒（既定: `1.2`）
+- `DIAG_PING_TIMEOUT_S`: 環境チェック（`GET /diagnostics`）の **Ollama疎通（/api/version）** のタイムアウト秒（既定: `2.5`）
 - `DIAG_LIST_TIMEOUT_S`: 環境チェック（`GET /diagnostics`）の **モデル一覧取得（ollama.list）** のタイムアウト秒（既定: `8.0`）
 - `DIAG_LIST_RETRIES`: モデル一覧取得のリトライ回数（既定: `1`）
 - `DIAG_EMBED_TIMEOUT_S`: 環境チェック（`GET /diagnostics`）の **embeddingスモークテスト** のタイムアウト秒（既定: `8.0`）
