@@ -70,7 +70,7 @@
         </ul>
         <p class="muted small">
           PDFは <code>./pdfs</code>（環境変数 <code>PDF_DIR</code>）に配置します。追加/更新後は <code>POST /reload</code> で索引（検索の準備）を作り直して反映できます。
-          スキャンPDFでテキスト抽出できない場合は「要OCR」として案内されます。
+          スキャンPDFでテキスト抽出できない場合は「要OCR」として案内されます。必要なら <code>ocrmypdf</code> による自動OCRも可能です（環境変数 <code>OCR_MODE=auto</code> / <code>OCR_LANG</code> など。macOS例: <code>brew install ocrmypdf tesseract</code>）。
           チャンク分割は <code>CHUNK_SIZE</code> / <code>CHUNK_OVERLAP</code> で調整できます。
         </p>
       </section>

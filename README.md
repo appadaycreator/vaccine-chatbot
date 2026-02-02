@@ -401,6 +401,49 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
 `.gitignore` で `*.pdf` を除外しているため、**PDFはGitにコミットされません**。  
 手元に `vaccine_manual.pdf` を置くか、`./pdfs/` にPDFを配置して利用してください。
 
+## OCR（スキャンPDF対応）
+
+スキャンPDFなどで **テキスト抽出がほぼ0** の場合、本プロジェクトは `ocrmypdf`（内部で tesseract / ghostscript 等を利用）で **自動OCRを試します**（横展開: **API / Streamlit / CLI**）。
+
+### 事前準備（macOS例）
+
+```bash
+brew install ocrmypdf tesseract
+```
+
+※OCRはPython依存ではなく **外部コマンド依存**です。未導入の場合、APIの `GET /sources` の `items[].ingest.ocr.error` が `ocrmypdf_not_found` になります。
+
+### OCRの設定（環境変数）
+
+- **`OCR_MODE`**: `off` / `auto` / `force`（既定: `auto`）
+  - `auto`: テキスト抽出できないPDFのみOCR（推奨）
+  - `force`: 既にテキストがあるPDFでも再OCR（精度確認や再生成向け）
+- **`OCR_LANG`**: 既定 `jpn+eng`
+- **`OCR_CACHE_DIR`**: 既定 `./ocr_cache`（OCR済みPDFのキャッシュ）
+- **`OCRMYPDF_ARGS`**: `ocrmypdf` への追加引数（必要な場合のみ）
+
+反映手順:
+
+- PDF追加/更新後、またはOCR設定を変えた後は **`POST /reload`** で再インデックスしてください（UIの「再インデックス」）。
+
+### OCR精度の判定（CER/WER）
+
+OCR結果を **定量評価**したい場合は `ocr_eval.py` を使います（正解テキストとの差で CER/WER を出します）。
+
+```bash
+. .venv/bin/activate
+
+# ページ別の正解テキスト（例: gt/1.txt, gt/2.txt ...）で評価
+python3 ocr_eval.py --pdf ./pdfs/your.pdf --gt-dir ./gt --out ocr_eval_report.json
+
+# 全文の正解テキスト（1ファイル）で評価
+python3 ocr_eval.py --pdf ./pdfs/your.pdf --gt ./gt.txt --out ocr_eval_report.json
+```
+
+補足:
+
+- スキャン品質の影響が大きいので、OCRがうまくいかない場合は `OCR_MODE=force`、`OCR_LANG`、`OCRMYPDF_ARGS` の調整を試してください。
+
 ### 「どんな質問でも“資料にない”になる」時の原因チェック
 
 「資料に書かれているはずの質問」でも、つねに次のような固定文が返る場合:
@@ -414,7 +457,7 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
   - 実行時の作業ディレクトリが想定と違うと、相対パスの `vaccine_manual.pdf` / `./pdfs` が見つかりません
 - **スキャンPDFでOCR不足（テキスト抽出できていない）**
   - PDFは見つかっても **抽出文字数がほぼ0** だと、検索が常に0件になり全質問で「資料にない」になります
-  - 対処: OCRして **テキスト入りPDF** にしてから配置してください
+  - 対処: OCRして **テキスト入りPDF** にしてから配置してください（または `ocrmypdf` を導入し `OCR_MODE=auto` で自動OCRを有効化）
   - 追加対策（抽出精度）: `pip install pymupdf` → `export PDF_LOADER=pymupdf`
 - **（APIの場合）インデックス未完了/失敗**
   - `GET /sources` の `error` / `next_actions` を確認し、必要なら `POST /reload` を実行

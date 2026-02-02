@@ -27,6 +27,8 @@ from langchain_community.vectorstores import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel, Field
 
+from pdf_ingest import load_pdf_docs_with_ocr_best_effort, ocr_settings_signature
+
 
 DEFAULT_PDF_PATH = "vaccine_manual.pdf"  # 単体PDF（任意）
 DEFAULT_PDF_DIR = "./pdfs"  # ここにPDFを置くと自動で参照（推奨）
@@ -146,6 +148,207 @@ def _new_request_id() -> str:
 # - 断定・誤誘導を避けるため、根拠（sources）が取れない場合は必ず「資料にない」を返す
 # - ユーザーが次に取る行動（相談先）を必ず出す
 ANSWER_SECTIONS = ("結論", "根拠", "相談先")
+
+_JP_TERM_RE = re.compile(r"[一-龥ぁ-んァ-ン]{2,}|[A-Za-z0-9]{2,}")
+_DEFAULT_TERM_STOPWORDS = {
+    # 日本語のよくある汎用語（ノイズを減らす）
+    "です",
+    "ます",
+    "する",
+    "した",
+    "して",
+    "いる",
+    "ある",
+    "こと",
+    "これ",
+    "それ",
+    "ため",
+    "場合",
+    "どの",
+    "どれ",
+    "どこ",
+    "いつ",
+    "なに",
+    "何",
+    "方法",
+    "目安",
+    "目的",
+    "要約",
+    "教えて",
+    "ください",
+    "について",
+    "ですか",
+    "どうすれば",
+    "どのくらい",
+    "範囲",
+    "資料",
+    "記載",
+    "アンケート",
+}
+
+
+def _keyword_terms(text: str) -> set[str]:
+    s = (text or "").strip()
+    if not s:
+        return set()
+    terms = {m.group(0) for m in _JP_TERM_RE.finditer(s)}
+    # 正規化（小文字化）: 英数字のみ
+    out: set[str] = set()
+    for t in terms:
+        tt = t.strip()
+        if not tt:
+            continue
+        if tt.isascii():
+            tt = tt.lower()
+        if tt in _DEFAULT_TERM_STOPWORDS:
+            continue
+        # 1文字（条件で排除しているが念のため）
+        if len(tt) < 2:
+            continue
+        out.add(tt)
+    return out
+
+
+def _keyword_overlap_score(terms: set[str], text: str) -> int:
+    if not terms:
+        return 0
+    body = (text or "")
+    if not body:
+        return 0
+    low = body.lower()
+    score = 0
+    for t in terms:
+        needle = t.lower() if t.isascii() else t
+        if needle and needle in low:
+            score += 1
+    return score
+
+
+def _filter_docs_by_keyword_overlap(prompt: str, docs: list[Any]) -> tuple[list[Any], dict[str, Any]]:
+    """
+    ベクトル検索が“それっぽいがズレている”ケース（例: QRコード手順が根拠に出る等）を抑えるための軽いフィルタ。
+    - 既定: 質問のキーワードが1つも含まれないdocは捨てる
+    - 全部捨てたら「根拠なし」として扱う（→ フォールバック or 資料にない）
+    """
+    min_overlap = int(os.environ.get("SEARCH_KEYWORD_OVERLAP_MIN", "1") or "1")
+    min_overlap = max(0, min(min_overlap, 10))
+    terms = _keyword_terms(prompt)
+    # 「7日」「2週間」など“期間/数字が絡む質問”はズレると致命的なので、少しだけ厳しめにする
+    if re.search(r"\d+\s*(日|日間|週間|週|か月|ヶ月|ヵ月)", prompt or ""):
+        min_overlap = max(min_overlap, 2)
+    if min_overlap <= 0 or not terms or not docs:
+        return docs, {"keyword_filter": {"enabled": bool(min_overlap > 0), "terms": len(terms), "kept": len(docs), "dropped": 0}}
+
+    kept: list[Any] = []
+    dropped = 0
+    best = 0
+    for d in docs:
+        txt = getattr(d, "page_content", "") or ""
+        sc = _keyword_overlap_score(terms, txt)
+        best = max(best, sc)
+        if sc >= min_overlap:
+            kept.append(d)
+        else:
+            dropped += 1
+    meta = {"keyword_filter": {"enabled": True, "terms": len(terms), "min_overlap": min_overlap, "best": best, "kept": len(kept), "dropped": dropped}}
+    return kept, meta
+
+
+def _normalize_answer_text(answer: str, *, fallback_used: bool) -> str:
+    """
+    LLM出力の体裁を整える（UIがMarkdown表示でも見出しが暴れないようにする）。
+    - `## 結論:` のようなMarkdown見出しを除去し、`結論:` 等に統一
+    - フォールバック時はページラベル（[P12]）等を削除
+    """
+    text = _normalize_newlines(answer).strip()
+    if not text:
+        return text
+
+    # まずは見出しの "##" 等を除去して正規化
+    norm_lines: list[str] = []
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        m = re.match(r"^\s*#{1,6}\s*(結論|根拠|相談先)\s*[:：]?\s*(.*)$", line)
+        if m:
+            head = m.group(1)
+            rest = (m.group(2) or "").strip()
+            norm_lines.append(f"{head}:" + (f" {rest}" if rest else ""))
+            continue
+        line = re.sub(r"^\s*#{2,6}\s+", "", line)
+        norm_lines.append(line)
+
+    text2 = "\n".join(norm_lines).strip()
+    for sec in ANSWER_SECTIONS:
+        text2 = re.sub(rf"^\s*{sec}\s*[:：]?\s*$", f"{sec}:", text2, flags=re.MULTILINE)
+
+    if fallback_used:
+        text2 = re.sub(r"\[P\d+\]", "", text2)
+        text2 = text2.replace("【資料】", "【参考情報】")
+
+    # セクションを抽出して、必ず3セクション構造に組み直す
+    sec_re = re.compile(r"^(結論|根拠|相談先):\s*(.*)$")
+    order = list(ANSWER_SECTIONS)
+    buckets: dict[str, list[str]] = {k: [] for k in order}
+    current: str | None = None
+    for raw in _normalize_newlines(text2).split("\n"):
+        line = raw.rstrip()
+        m = sec_re.match(line.strip())
+        if m:
+            current = m.group(1)
+            rest = (m.group(2) or "").strip()
+            if rest:
+                buckets[current].append(rest)
+            continue
+        if current:
+            buckets[current].append(line)
+
+    def _clean_block(lines: list[str]) -> str:
+        # 連続空行を潰しつつ整形
+        out: list[str] = []
+        last_blank = True
+        for ln in [x.rstrip() for x in (lines or [])]:
+            if not ln.strip():
+                if not last_blank:
+                    out.append("")
+                last_blank = True
+                continue
+            out.append(ln)
+            last_blank = False
+        return "\n".join(out).strip()
+
+    conclusion = _clean_block(buckets.get("結論", []))
+    rationale = _clean_block(buckets.get("根拠", []))
+    consult = _clean_block(buckets.get("相談先", []))
+
+    # 相談先が崩れやすいので、最低限の形に補正する
+    default_consult = "- 接種を受けた医療機関\n- お住まいの自治体の予防接種相談窓口\n- 症状が強い／急に悪化した／緊急性が疑われる場合: 119（救急）"
+    if not consult:
+        consult = default_consult
+    else:
+        # 箇条書きに寄せる（単文だけのケース）
+        if not any(ln.lstrip().startswith(("-", "・", "*")) for ln in consult.split("\n") if ln.strip()):
+            consult = "- " + consult.strip()
+        # 医療機関/自治体/119 は最低限含める（UIの常設導線に合わせる）
+        if "医療機関" not in consult and "かかりつけ" not in consult:
+            consult = consult.rstrip() + "\n- 接種を受けた医療機関"
+        if "自治体" not in consult:
+            consult = consult.rstrip() + "\n- お住まいの自治体の予防接種相談窓口"
+        if "119" not in consult:
+            consult = consult.rstrip() + "\n- 症状が強い／急に悪化した／緊急性が疑われる場合: 119（救急）"
+
+    # 根拠が空なら最低限の文言を入れる（空出力防止）
+    if not rationale:
+        rationale = "- （資料の該当箇所を特定できませんでした）" if not fallback_used else "- （参考情報と一般的な注意に基づきます）"
+
+    # 結論が空なら、元文面をそのまま結論に入れておく（空出力防止）
+    if not conclusion:
+        conclusion = "（回答を生成できませんでした）"
+
+    out = f"結論:\n{conclusion}\n\n根拠:\n{rationale}\n\n相談先:\n{consult}\n"
+    # 余計な二重スペースなどを軽く掃除
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out
 
 
 def _no_sources_answer(question: str) -> str:
@@ -709,6 +912,18 @@ def _source_signature(paths: list[str]) -> list[dict[str, Any]]:
     return sig
 
 
+def _ocr_signature() -> dict[str, Any]:
+    """
+    OCR設定（環境変数）をインデックスの差分判定に含めるための署名。
+    - PDFが同一でも OCR_MODE / OCR_LANG 等が変わると抽出テキストが変化し得るため
+    """
+    try:
+        return ocr_settings_signature()
+    except Exception:
+        # OCRが未導入でもAPIは動くので、失敗しても固定値で吸収する
+        return {"type": "ocr_settings", "error": "unavailable"}
+
+
 def _manifest_path(persist_dir: str) -> str:
     return os.path.join(persist_dir, INDEX_MANIFEST_NAME)
 
@@ -967,12 +1182,12 @@ def _analyze_and_split_pdf(pdf_path: str) -> tuple[list[Any], dict[str, Any]]:
     PDFを読み込み、チャンク化して返す。
     併せて「テキスト抽出できたか（OCR不足か）」等のユーザー向け情報を返す。
     """
-    docs, loader_used = _load_pdf_docs_best_effort(pdf_path)
+    # OCRを含めたベストエフォート取り込み（スキャンPDFでも自動でテキスト化を試す）
+    docs, ingest_meta = load_pdf_docs_with_ocr_best_effort(pdf_path)
+    loader_used = str((ingest_meta or {}).get("loader") or "unknown")
+    ocr_meta = (ingest_meta or {}).get("ocr") if isinstance(ingest_meta, dict) else None
+    cleanup_meta = (ingest_meta or {}).get("cleanup") if isinstance(ingest_meta, dict) else None
     pages = len(docs)
-    for d in docs:
-        d.page_content = _clean_pdf_text(getattr(d, "page_content", "") or "")
-
-    strip_rep = _strip_repeated_header_footer(docs)
 
     extracted_chars = 0
     for d in docs:
@@ -995,10 +1210,23 @@ def _analyze_and_split_pdf(pdf_path: str) -> tuple[list[Any], dict[str, Any]]:
     hints: list[str] = []
     if ocr_needed:
         status = "ocr_needed"
-        hints = [
-            "スキャンPDFの場合はOCRして、テキスト入りのPDFにしてから配置してください",
-            "OCR後に POST /reload（UIの「再インデックス」）で再インデックスしてください",
-        ]
+        # OCRの成否に応じて「次にやること」を出し分ける
+        if isinstance(ocr_meta, dict) and str(ocr_meta.get("error") or "") == "ocrmypdf_not_found":
+            hints = [
+                "OCRが必要ですが、ocrmypdf が見つかりません（外部コマンド）。macOSなら `brew install ocrmypdf tesseract` を検討してください",
+                "OCR導入後に POST /reload（UIの「再インデックス」）で再インデックスしてください",
+            ]
+        elif isinstance(ocr_meta, dict) and bool(ocr_meta.get("attempted")):
+            hints = [
+                "OCRを試しましたが十分なテキストを抽出できませんでした（元PDFの画質/傾き/解像度の可能性）",
+                "OCR_LANG（既定: jpn+eng）や OCRMYPDF_ARGS を調整して再試行できます（例: OCR_MODE=force）",
+                "OCR後に POST /reload（UIの「再インデックス」）で再インデックスしてください",
+            ]
+        else:
+            hints = [
+                "スキャンPDFの場合はOCRして、テキスト入りのPDFにしてから配置してください（または OCR_MODE=auto を有効化してください）",
+                "OCR後に POST /reload（UIの「再インデックス」）で再インデックスしてください",
+            ]
 
     report = {
         "status": status,
@@ -1006,7 +1234,8 @@ def _analyze_and_split_pdf(pdf_path: str) -> tuple[list[Any], dict[str, Any]]:
         "extracted_chars": extracted_chars,
         "chunk_count": chunk_count,
         "loader": loader_used,
-        "cleanup": strip_rep,
+        "cleanup": cleanup_meta,
+        "ocr": ocr_meta,
         "hints": hints,
     }
     return chunks, report
@@ -1170,9 +1399,12 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
 
     paths = _list_pdf_paths(pdf_path, pdf_dir)
     sig = _source_signature(paths)
+    ocr_sig = _ocr_signature()
+    ocr_sig = _ocr_signature()
 
     last_sig = getattr(app.state, "source_signature", None)
-    if (not force) and app.state.vectorstore is not None and last_sig == sig:
+    last_ocr_sig = getattr(app.state, "ocr_settings_signature", None)
+    if (not force) and app.state.vectorstore is not None and last_sig == sig and last_ocr_sig == ocr_sig:
         return
 
     # 既存DBがあり、ソースが変わっていないならロードで済ませる
@@ -1181,7 +1413,7 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
     # - last_sig が一致しない（=未知/変更あり）状態で Chroma を先に初期化すると、
     #   その後の再構築で persist_dir を削除した際に内部状態が不整合になり、
     #   SQLite が「readonly database」になるケースがあるため、先に一致確認を行う。
-    if (not force) and last_sig == sig and os.path.isdir(persist_dir):
+    if (not force) and last_sig == sig and last_ocr_sig == ocr_sig and os.path.isdir(persist_dir):
         try:
             vs = _load_vectorstore(persist_dir)
             if _is_vectorstore_ready(vs):
@@ -1216,6 +1448,7 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
 
     try:
         prev_sig = getattr(app.state, "source_signature", None)
+        prev_ocr_sig = getattr(app.state, "ocr_settings_signature", None)
 
         # 作り直し（失敗時に既存DBを維持できるよう、_rebuild_vectorstore 側で先に解析する）
         try:
@@ -1238,6 +1471,7 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
                 raise
         app.state.vectorstore = vs
         app.state.source_signature = sig
+        app.state.ocr_settings_signature = ocr_sig
         app.state.last_indexed_at = _utc_now_iso()
         app.state.init_error = None
         _update_index_status(
@@ -1253,6 +1487,7 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
             persist_dir,
             {
                 "source_signature": sig,
+                "ocr_settings_signature": ocr_sig,
                 "last_indexed_at": app.state.last_indexed_at,
                 "pdf_path": pdf_path,
                 "pdf_dir": pdf_dir,
@@ -1319,6 +1554,7 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
             persist_dir,
             {
                 "source_signature": getattr(app.state, "source_signature", prev_sig),
+                "ocr_settings_signature": getattr(app.state, "ocr_settings_signature", prev_ocr_sig),
                 "last_indexed_at": getattr(app.state, "last_indexed_at", None),
                 "pdf_path": pdf_path,
                 "pdf_dir": pdf_dir,
@@ -1364,6 +1600,7 @@ async def _startup() -> None:
     app.state.run_mode = run_mode
     app.state.ingest_lock = asyncio.Lock()
     app.state.source_signature = None
+    app.state.ocr_settings_signature = _ocr_signature()
     app.state.last_indexed_at = None
     app.state.last_request_timings = None
     app.state.index_status_lock = threading.Lock()
@@ -1379,6 +1616,8 @@ async def _startup() -> None:
         if isinstance(m, dict) and "source_signature" in m:
             app.state.source_signature = m.get("source_signature")
             app.state.last_indexed_at = m.get("last_indexed_at")
+        if isinstance(m, dict) and "ocr_settings_signature" in m:
+            app.state.ocr_settings_signature = m.get("ocr_settings_signature")
         if isinstance(m, dict) and isinstance(m.get("index_status"), dict):
             # 起動後に /sources で理由を出せるよう、前回の情報を引き継ぐ
             _update_index_status(m.get("index_status"))
@@ -1468,6 +1707,7 @@ def status() -> dict[str, Any]:
         "last_indexed_at": getattr(app.state, "last_indexed_at", None),
         "init_error": getattr(app.state, "init_error", None),
         "indexing": _get_index_status(),
+        "ocr_settings": getattr(app.state, "ocr_settings_signature", None),
         "embed_model": DEFAULT_EMBED_MODEL,
         "embed_warmup": getattr(app.state, "embed_warmup", None),
         "embedding_cache": getattr(app.state, "embedding_cache", _LRUCache(DEFAULT_CACHE_MAX_ENTRIES)).stats(),
@@ -1512,8 +1752,9 @@ def list_sources() -> dict[str, Any]:
         )
 
     indexed_sig = getattr(app.state, "source_signature", None)
+    indexed_ocr_sig = getattr(app.state, "ocr_settings_signature", None)
     running = bool(index_status.get("running") is True)
-    indexed = bool(app.state.vectorstore is not None and indexed_sig == sig and (not running))
+    indexed = bool(app.state.vectorstore is not None and indexed_sig == sig and indexed_ocr_sig == ocr_sig and (not running))
 
     next_actions: list[str] = []
     if not items:
@@ -1548,6 +1789,7 @@ def list_sources() -> dict[str, Any]:
         "pdf_path": pdf_path,
         "pdf_dir": pdf_dir,
         "legacy_pdf_dir": LEGACY_PDF_DIR,
+        "ocr_settings": ocr_sig,
         "init_error": getattr(app.state, "init_error", None),
         "error": index_status.get("last_error"),
         "next_actions": next_actions,
@@ -1959,6 +2201,10 @@ async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_time
             # 再試行が失敗しても、元の検索結果（空）のまま返す
             pass
 
+    # 追加の安全策: “質問と関係ないページ”が根拠に混ざるのを抑制（キーワード一致の薄いdocを落とす）
+    docs, kw_meta = _filter_docs_by_keyword_overlap(prompt, list(docs or []))
+    timings.update(kw_meta)
+
     timings["total_ms"] = int((time.perf_counter() - t_total0) * 1000)
     context = _format_context(docs)
     return {"docs": docs, "context": context, "timings": timings}
@@ -2013,7 +2259,8 @@ async def _run_generate(prompt: str, context: str, model: str, max_tokens: int, 
             status_code=500,
         )
 
-    return {"answer": response.get("response", ""), "timings": {"generate_ms": int((time.perf_counter() - t0) * 1000)}}
+    ans = _normalize_answer_text(response.get("response", ""), fallback_used=False)
+    return {"answer": ans, "timings": {"generate_ms": int((time.perf_counter() - t0) * 1000)}}
 
 
 def _env_allow_general_fallback_default() -> bool:
@@ -2066,7 +2313,8 @@ async def _run_generate_general_fallback(prompt: str, model: str, max_tokens: in
             extra={"error": str(e)},
             status_code=500,
         )
-    return {"answer": response.get("response", ""), "timings": {"generate_ms": int((time.perf_counter() - t0) * 1000)}}
+    ans = _normalize_answer_text(response.get("response", ""), fallback_used=True)
+    return {"answer": ans, "timings": {"generate_ms": int((time.perf_counter() - t0) * 1000)}}
 
 
 @app.post("/search")
@@ -2160,7 +2408,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
                 (timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0) + timings.get("generate_ms", 0))
             )
         else:
-            answer = _no_sources_answer(payload.prompt)
+            answer = _normalize_answer_text(_no_sources_answer(payload.prompt), fallback_used=False)
             timings["generate_ms"] = 0
             timings["total_ms"] = int((timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0)))
         app.state.last_request_timings = {"stage": "chat", **timings}

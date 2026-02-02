@@ -6,6 +6,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import OllamaEmbeddings
 
+from pdf_ingest import load_pdf_docs_with_ocr_best_effort
+
 
 def _normalize_newlines(text: str) -> str:
     return (text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -175,13 +177,12 @@ def _list_pdf_paths() -> list[str]:
 
 
 def _analyze_and_split_pdf(pdf_path: str) -> tuple[list, dict]:
-    docs = _load_pdf_docs_best_effort(pdf_path)
+    docs, ingest_meta = load_pdf_docs_with_ocr_best_effort(pdf_path)
     pages = len(docs)
     for d in docs:
         d.metadata = dict(getattr(d, "metadata", {}) or {})
         d.metadata["source"] = os.path.basename(pdf_path)
         d.page_content = _clean_pdf_text(getattr(d, "page_content", "") or "")
-    _strip_repeated_header_footer(docs)
 
     extracted_chars = sum(len((getattr(d, "page_content", "") or "").strip()) for d in docs)
     splitter = _get_splitter()
@@ -192,6 +193,9 @@ def _analyze_and_split_pdf(pdf_path: str) -> tuple[list, dict]:
         "pages": pages,
         "extracted_chars": extracted_chars,
         "chunk_count": len(chunks),
+        "loader": (ingest_meta or {}).get("loader") if isinstance(ingest_meta, dict) else None,
+        "ocr": (ingest_meta or {}).get("ocr") if isinstance(ingest_meta, dict) else None,
+        "cleanup": (ingest_meta or {}).get("cleanup") if isinstance(ingest_meta, dict) else None,
     }
     return chunks, report
 

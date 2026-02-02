@@ -10,6 +10,8 @@ from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from pdf_ingest import load_pdf_docs_with_ocr_best_effort, ocr_settings_signature
+
 # ページの設定
 st.set_page_config(page_title="ワクチン接種後健康観察アシスタント", page_icon="🏥")
 st.title("🏥 健康観察アシスタント")
@@ -329,15 +331,18 @@ def _build_vectorstore_from_paths(paths: list[str], signature: str):
     ingest_items: list[dict] = []
     splitter = _get_splitter()
     for p in paths:
-        docs, loader_used = _load_pdf_docs_best_effort(p)
+        docs, ingest_meta = load_pdf_docs_with_ocr_best_effort(p)
+        loader_used = str((ingest_meta or {}).get("loader") or "unknown")
+        ocr_meta = (ingest_meta or {}).get("ocr") if isinstance(ingest_meta, dict) else None
+        cleanup_meta = (ingest_meta or {}).get("cleanup") if isinstance(ingest_meta, dict) else None
         docs = _normalize_docs_source(docs, os.path.basename(p))
         extracted_chars = 0
         for d in docs:
             d.metadata = dict(d.metadata or {})
             d.metadata["loader"] = loader_used
+            # pdf_ingest 側で最低限のクリーニングは済んでいるが、ここでも念のため正規化
             d.page_content = _clean_pdf_text(getattr(d, "page_content", "") or "")
             extracted_chars += len((d.page_content or "").strip())
-        _strip_repeated_header_footer(docs)
         part = [c for c in splitter.split_documents(docs) if (c.page_content or "").strip()]
         chunks.extend(part)
         ingest_items.append(
@@ -348,6 +353,8 @@ def _build_vectorstore_from_paths(paths: list[str], signature: str):
                 "extracted_chars": extracted_chars,
                 "chunk_count": len(part),
                 "loader": loader_used,
+                "cleanup": cleanup_meta,
+                "ocr": ocr_meta,
             }
         )
 
@@ -405,6 +412,11 @@ def _signature(paths: list[str]) -> str:
             parts.append(f"{os.path.abspath(p)}|{int(st_.st_size)}|{float(st_.st_mtime)}")
         except Exception:
             parts.append(f"{os.path.abspath(p)}|NA|NA")
+    # OCR設定もキャッシュキーに含める（OCR_MODE/OCR_LANG等の変更を反映させるため）
+    try:
+        parts.append(json.dumps(ocr_settings_signature(), ensure_ascii=False, sort_keys=True))
+    except Exception:
+        parts.append("ocr_settings:unavailable")
     return "\n".join(sorted(parts))
 
 paths = _list_pdf_paths()
