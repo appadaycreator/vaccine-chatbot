@@ -76,6 +76,7 @@
       <section class="card card--chat">
         <h2>チャット</h2>
         <div id="messages" class="messages" aria-live="polite"></div>
+        <div id="progress" class="muted small progress" aria-live="polite"></div>
         <form id="chatForm" class="composer">
           <input
             id="prompt"
@@ -86,6 +87,7 @@
             required
           />
           <button id="send" class="btn" type="submit">送信</button>
+          <button id="cancel" class="btn btn--secondary" type="button" hidden>キャンセル</button>
         </form>
         <div class="muted small">
           ヒント: URLに <code>?api=...</code> を付けても設定できます（例:

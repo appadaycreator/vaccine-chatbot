@@ -2,8 +2,9 @@ import asyncio
 import json
 import os
 import shutil
+import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 import ollama
 from fastapi import FastAPI, HTTPException
@@ -24,6 +25,11 @@ MAX_CONTEXT_CHARS = 5000
 MAX_DOC_CHARS = 1400
 INDEX_MANIFEST_NAME = "source_index.json"
 
+DEFAULT_EMBEDDING_TIMEOUT_S = 180
+DEFAULT_SEARCH_TIMEOUT_S = 60
+DEFAULT_GENERATE_TIMEOUT_S = 180
+DEFAULT_CACHE_MAX_ENTRIES = 512
+
 
 app = FastAPI(title="vaccine-chatbot API", version="0.2.0")
 
@@ -42,6 +48,70 @@ class ChatRequest(BaseModel):
     k: int = Field(default=3, ge=1, le=20)
     max_tokens: int = Field(default=256, ge=32, le=1024)
     timeout_s: int = Field(default=180, ge=10, le=600)
+    embedding_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
+    search_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
+    generate_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
+
+
+class SearchRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    k: int = Field(default=3, ge=1, le=20)
+    timeout_s: int = Field(default=120, ge=5, le=900)  # 互換（まとめて指定）
+    embedding_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
+    search_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
+
+
+class GenerateRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    model: str = Field(default="gemma2:2b", min_length=1, max_length=100)
+    max_tokens: int = Field(default=256, ge=32, le=2048)
+    timeout_s: int = Field(default=180, ge=5, le=900)  # 互換（まとめて指定）
+    generate_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
+    context: str = Field(default="", max_length=MAX_CONTEXT_CHARS + 500)
+
+
+class _LRUCache:
+    def __init__(self, max_entries: int):
+        self.max_entries = max(1, int(max_entries))
+        self._data: dict[str, Any] = {}
+        self._order: list[str] = []
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str) -> Any | None:
+        if key in self._data:
+            self.hits += 1
+            try:
+                self._order.remove(key)
+            except ValueError:
+                pass
+            self._order.append(key)
+            return self._data[key]
+        self.misses += 1
+        return None
+
+    def set(self, key: str, value: Any) -> None:
+        if key in self._data:
+            self._data[key] = value
+            try:
+                self._order.remove(key)
+            except ValueError:
+                pass
+            self._order.append(key)
+            return
+        self._data[key] = value
+        self._order.append(key)
+        while len(self._order) > self.max_entries:
+            oldest = self._order.pop(0)
+            self._data.pop(oldest, None)
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "max_entries": self.max_entries,
+            "entries": len(self._data),
+            "hits": self.hits,
+            "misses": self.misses,
+        }
 
 
 def _format_context(docs) -> str:
@@ -251,7 +321,7 @@ def _ensure_index_uptodate(force: bool = False) -> None:
 
 
 @app.on_event("startup")
-def _startup() -> None:
+async def _startup() -> None:
     persist_dir = os.environ.get("CHROMA_PERSIST_DIR", DEFAULT_PERSIST_DIR)
     pdf_path = os.environ.get("PDF_PATH", DEFAULT_PDF_PATH)
     pdf_dir = os.environ.get("PDF_DIR", DEFAULT_PDF_DIR)
@@ -264,6 +334,11 @@ def _startup() -> None:
     app.state.ingest_lock = asyncio.Lock()
     app.state.source_signature = None
     app.state.last_indexed_at = None
+    app.state.last_request_timings = None
+    app.state.embeddings = OllamaEmbeddings(model=DEFAULT_EMBED_MODEL)
+    cache_max = int(os.environ.get("EMBED_CACHE_MAX", str(DEFAULT_CACHE_MAX_ENTRIES)))
+    app.state.embedding_cache = _LRUCache(max_entries=cache_max)
+    app.state.embed_warmup = {"ok": False, "started_at": None, "finished_at": None, "error": None, "ms": None}
 
     # 起動時にmanifestがあれば拾う（参考情報）
     try:
@@ -279,6 +354,27 @@ def _startup() -> None:
         _ensure_index_uptodate(force=False)
     except Exception as e:
         app.state.init_error = str(e)
+
+    # "初回だけ遅い" 対策: embeddingモデルを軽くウォームアップ（失敗しても落とさない）
+    async def _warmup_embed():
+        app.state.embed_warmup["started_at"] = datetime.now(tz=timezone.utc).isoformat()
+        t0 = time.perf_counter()
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(app.state.embeddings.embed_query, "warmup"),
+                timeout=float(os.environ.get("EMBED_WARMUP_TIMEOUT_S", str(DEFAULT_EMBEDDING_TIMEOUT_S))),
+            )
+            ms = int((time.perf_counter() - t0) * 1000)
+            app.state.embed_warmup.update(
+                {"ok": True, "error": None, "finished_at": datetime.now(tz=timezone.utc).isoformat(), "ms": ms}
+            )
+        except Exception as e:
+            ms = int((time.perf_counter() - t0) * 1000)
+            app.state.embed_warmup.update(
+                {"ok": False, "error": str(e), "finished_at": datetime.now(tz=timezone.utc).isoformat(), "ms": ms}
+            )
+
+    asyncio.create_task(_warmup_embed())
 
 
 @app.get("/health")
@@ -298,6 +394,10 @@ def status() -> dict[str, Any]:
         "pdf_count": len(pdfs),
         "last_indexed_at": getattr(app.state, "last_indexed_at", None),
         "init_error": getattr(app.state, "init_error", None),
+        "embed_model": DEFAULT_EMBED_MODEL,
+        "embed_warmup": getattr(app.state, "embed_warmup", None),
+        "embedding_cache": getattr(app.state, "embedding_cache", _LRUCache(DEFAULT_CACHE_MAX_ENTRIES)).stats(),
+        "last_request_timings": getattr(app.state, "last_request_timings", None),
     }
 
 
@@ -346,45 +446,211 @@ async def reload_sources() -> dict[str, Any]:
             raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/chat")
-async def chat_endpoint(request: ChatRequest):
-    try:
-        # PDF配置の変更があれば自動追従（重い処理なので排他）
-        lock: asyncio.Lock = app.state.ingest_lock
-        async with lock:
-            try:
-                await asyncio.to_thread(_ensure_index_uptodate, False)
-                app.state.init_error = None
-            except Exception as e:
-                app.state.vectorstore = None
-                app.state.init_error = str(e)
+def _resolve_timeouts(
+    timeout_s: int,
+    embedding_timeout_s: Optional[int],
+    search_timeout_s: Optional[int],
+    generate_timeout_s: Optional[int],
+) -> tuple[int, int, int]:
+    # 新フィールドが未指定なら、互換の timeout_s を使用
+    et = int(embedding_timeout_s if embedding_timeout_s is not None else timeout_s)
+    st = int(search_timeout_s if search_timeout_s is not None else timeout_s)
+    gt = int(generate_timeout_s if generate_timeout_s is not None else timeout_s)
+    return max(1, et), max(1, st), max(1, gt)
 
-        vs = app.state.vectorstore
-        if vs is None:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "message": "RAGエンジンが未初期化です（PDFが不足、またはテキスト抽出できない可能性）",
-                    "persist_dir": getattr(app.state, "persist_dir", DEFAULT_PERSIST_DIR),
-                    "pdf_path": getattr(app.state, "pdf_path", DEFAULT_PDF_PATH),
-                    "pdf_dir": getattr(app.state, "pdf_dir", DEFAULT_PDF_DIR),
-                    "init_error": getattr(app.state, "init_error", None),
-                },
-            )
 
+def _http_error(
+    *,
+    stage: str,
+    code: str,
+    message: str,
+    timeout_s: int | None = None,
+    hints: Optional[list[str]] = None,
+    timings: Optional[dict[str, Any]] = None,
+    extra: Optional[dict[str, Any]] = None,
+    status_code: int = 500,
+) -> None:
+    detail: dict[str, Any] = {"stage": stage, "code": code, "message": message}
+    if timeout_s is not None:
+        detail["timeout_s"] = int(timeout_s)
+    if hints:
+        detail["hints"] = hints
+    if timings:
+        detail["timings"] = timings
+    if extra:
+        detail.update(extra)
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+def _is_ollama_down_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(
+        s in msg
+        for s in [
+            "connection refused",
+            "failed to connect",
+            "connecterror",
+            "connectionerror",
+            "cannot connect",
+            "no such host",
+        ]
+    )
+
+
+async def _embed_query_with_cache(prompt: str, timeout_s: int) -> tuple[list[float], dict[str, Any]]:
+    cache: _LRUCache = app.state.embedding_cache
+    key = prompt.strip()
+    cached = cache.get(key)
+    if cached is not None:
+        return cached, {"cached_embedding": True}
+
+    retries = int(os.environ.get("EMBED_RETRIES", "2"))
+    base_delay = float(os.environ.get("EMBED_RETRY_BASE_DELAY_S", "0.25"))
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
         try:
-            docs = await asyncio.wait_for(
-                asyncio.to_thread(vs.similarity_search, request.prompt, k=request.k),
-                timeout=request.timeout_s,
+            vec = await asyncio.wait_for(
+                asyncio.to_thread(app.state.embeddings.embed_query, prompt),
+                timeout=timeout_s,
             )
-        except TimeoutError:
-            raise HTTPException(
-                status_code=504,
-                detail={"message": "検索（embedding/類似検索）がタイムアウトしました", "timeout_s": request.timeout_s},
-            )
+            cache.set(key, vec)
+            return vec, {"cached_embedding": False, "attempt": attempt + 1}
+        except TimeoutError as e:
+            last_err = e
+        except Exception as e:
+            last_err = e
+        if attempt < retries:
+            await asyncio.sleep(base_delay * (2**attempt))
+    assert last_err is not None
+    raise last_err
 
-        context = _format_context(docs)
-        full_prompt = f"""
+
+async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_timeout_s: int) -> dict[str, Any]:
+    # PDF配置の変更があれば自動追従（重い処理なので排他）
+    lock: asyncio.Lock = app.state.ingest_lock
+    async with lock:
+        try:
+            await asyncio.to_thread(_ensure_index_uptodate, False)
+            app.state.init_error = None
+        except Exception as e:
+            app.state.vectorstore = None
+            app.state.init_error = str(e)
+
+    vs = app.state.vectorstore
+    if vs is None:
+        _http_error(
+            stage="search",
+            code="RAG_NOT_READY",
+            message="RAGエンジンが未初期化です（PDFが不足、またはテキスト抽出できない可能性）",
+            hints=[
+                "PDFを ./pdfs/（環境変数 PDF_DIR）に配置してください",
+                "スキャンPDFの場合はOCRしてから配置してください",
+                "PDFを追加・更新したら POST /reload で再インデックスしてください",
+                "GET /status で init_error / pdf_count を確認してください",
+            ],
+            extra={
+                "persist_dir": getattr(app.state, "persist_dir", DEFAULT_PERSIST_DIR),
+                "pdf_path": getattr(app.state, "pdf_path", DEFAULT_PDF_PATH),
+                "pdf_dir": getattr(app.state, "pdf_dir", DEFAULT_PDF_DIR),
+                "init_error": getattr(app.state, "init_error", None),
+            },
+            status_code=503,
+        )
+
+    timings: dict[str, Any] = {}
+    t_total0 = time.perf_counter()
+
+    # embedding
+    t_embed0 = time.perf_counter()
+    try:
+        vec, embed_meta = await _embed_query_with_cache(prompt, timeout_s=embedding_timeout_s)
+        timings["embedding_ms"] = int((time.perf_counter() - t_embed0) * 1000)
+        timings.update(embed_meta)
+    except TimeoutError:
+        timings["embedding_ms"] = int((time.perf_counter() - t_embed0) * 1000)
+        _http_error(
+            stage="embedding",
+            code="EMBEDDING_TIMEOUT",
+            message="embedding（クエリのベクトル化）がタイムアウトしました",
+            timeout_s=embedding_timeout_s,
+            hints=[
+                "Ollama が起動しているか確認してください（Mac mini なら brew services start ollama など）",
+                f"Ollama に {DEFAULT_EMBED_MODEL} が入っているか確認してください（ollama pull {DEFAULT_EMBED_MODEL}）",
+                "初回はモデル起動で時間がかかります。しばらく待つか、タイムアウトを延長してください",
+            ],
+            timings=timings,
+            status_code=504,
+        )
+    except Exception as e:
+        timings["embedding_ms"] = int((time.perf_counter() - t_embed0) * 1000)
+        if _is_ollama_down_error(e):
+            _http_error(
+                stage="embedding",
+                code="OLLAMA_UNAVAILABLE",
+                message="embedding に失敗しました（Ollama に接続できない可能性）",
+                hints=[
+                    "Ollama が起動しているか確認してください",
+                    f"モデルが存在するか確認してください（ollama pull {DEFAULT_EMBED_MODEL}）",
+                ],
+                timings=timings,
+                extra={"error": str(e)},
+                status_code=502,
+            )
+        _http_error(
+            stage="embedding",
+            code="EMBEDDING_ERROR",
+            message="embedding に失敗しました",
+            hints=["GET /status で ready / init_error を確認してください"],
+            timings=timings,
+            extra={"error": str(e)},
+            status_code=500,
+        )
+
+    # similarity search (vector search)
+    t_search0 = time.perf_counter()
+    try:
+        fn = getattr(vs, "similarity_search_by_vector", None)
+        if callable(fn):
+            docs = await asyncio.wait_for(asyncio.to_thread(fn, vec, k=k), timeout=search_timeout_s)
+        else:
+            docs = await asyncio.wait_for(asyncio.to_thread(vs.similarity_search, prompt, k=k), timeout=search_timeout_s)
+        timings["search_ms"] = int((time.perf_counter() - t_search0) * 1000)
+    except TimeoutError:
+        timings["search_ms"] = int((time.perf_counter() - t_search0) * 1000)
+        _http_error(
+            stage="search",
+            code="SEARCH_TIMEOUT",
+            message="類似検索（ベクトルDBクエリ）がタイムアウトしました",
+            timeout_s=search_timeout_s,
+            hints=[
+                "PDF数が多い/初回インデックス直後は遅くなることがあります",
+                "k を小さくして試してください（例: 3→2）",
+                "PDF追加・更新後は POST /reload で再インデックスしてください",
+            ],
+            timings=timings,
+            extra={"pdf_count": len(_list_pdf_paths(app.state.pdf_path, app.state.pdf_dir))},
+            status_code=504,
+        )
+    except Exception as e:
+        timings["search_ms"] = int((time.perf_counter() - t_search0) * 1000)
+        _http_error(
+            stage="search",
+            code="SEARCH_ERROR",
+            message="類似検索に失敗しました",
+            hints=["POST /reload で再インデックスを試してください", "GET /status で init_error を確認してください"],
+            timings=timings,
+            extra={"error": str(e)},
+            status_code=500,
+        )
+
+    timings["total_ms"] = int((time.perf_counter() - t_total0) * 1000)
+    context = _format_context(docs)
+    return {"docs": docs, "context": context, "timings": timings}
+
+
+async def _run_generate(prompt: str, context: str, model: str, max_tokens: int, generate_timeout_s: int) -> dict[str, Any]:
+    t0 = time.perf_counter()
+    full_prompt = f"""
 あなたは厚労省の資料に基づいて回答する専門アシスタントです。
 以下の【資料】の内容に基づいて、日本語で簡潔に回答してください。
 資料に記載がない場合は「資料内には該当する情報が見当たりません」と答え、自治体の相談窓口または接種を受けた医療機関への相談を促してください。
@@ -392,27 +658,129 @@ async def chat_endpoint(request: ChatRequest):
 【資料】:
 {context}
 
-質問: {request.prompt}
+質問: {prompt}
 回答:
 """.strip()
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                ollama.generate,
+                model=model,
+                prompt=full_prompt,
+                options={"num_predict": max_tokens},
+            ),
+            timeout=generate_timeout_s,
+        )
+    except TimeoutError:
+        _http_error(
+            stage="generate",
+            code="GENERATE_TIMEOUT",
+            message="生成（LLM応答）がタイムアウトしました",
+            timeout_s=generate_timeout_s,
+            hints=[
+                "初回はモデル起動で時間がかかります。しばらく待つか、タイムアウトを延長してください",
+                "軽量モデル（例: gemma2:2b）を選んでください",
+            ],
+            timings={"generate_ms": int((time.perf_counter() - t0) * 1000)},
+            status_code=504,
+        )
+    except Exception as e:
+        if _is_ollama_down_error(e):
+            _http_error(
+                stage="generate",
+                code="OLLAMA_UNAVAILABLE",
+                message="生成に失敗しました（Ollama に接続できない可能性）",
+                hints=["Ollama が起動しているか確認してください", f"モデルが存在するか確認してください（ollama pull {model}）"],
+                extra={"error": str(e)},
+                status_code=502,
+            )
+        _http_error(
+            stage="generate",
+            code="GENERATE_ERROR",
+            message="生成に失敗しました",
+            hints=["モデル名を確認してください", "Ollama のログを確認してください"],
+            extra={"error": str(e)},
+            status_code=500,
+        )
 
+    return {"answer": response.get("response", ""), "timings": {"generate_ms": int((time.perf_counter() - t0) * 1000)}}
+
+
+@app.post("/search")
+async def search_endpoint(request: SearchRequest):
+    et, st, _ = _resolve_timeouts(request.timeout_s, request.embedding_timeout_s, request.search_timeout_s, None)
+    result = await _run_search(request.prompt, request.k, embedding_timeout_s=et, search_timeout_s=st)
+    docs = result["docs"]
+    timings = result["timings"]
+    app.state.last_request_timings = {"stage": "search", **timings}
+    try:
+        print(json.dumps({"ts": datetime.now(tz=timezone.utc).isoformat(), "event": "search", "k": request.k, "timings": timings}, ensure_ascii=False))
+    except Exception:
+        pass
+    return {"context": result["context"], "sources": _extract_sources(docs), "timings": timings}
+
+
+@app.post("/generate")
+async def generate_endpoint(request: GenerateRequest):
+    _, _, gt = _resolve_timeouts(request.timeout_s, None, None, request.generate_timeout_s)
+    result = await _run_generate(
+        prompt=request.prompt,
+        context=(request.context or "")[: MAX_CONTEXT_CHARS + 500],
+        model=request.model,
+        max_tokens=request.max_tokens,
+        generate_timeout_s=gt,
+    )
+    timings = result["timings"]
+    app.state.last_request_timings = {"stage": "generate", **timings}
+    try:
+        print(json.dumps({"ts": datetime.now(tz=timezone.utc).isoformat(), "event": "generate", "model": request.model, "timings": timings}, ensure_ascii=False))
+    except Exception:
+        pass
+    return {"answer": result["answer"], "timings": timings}
+
+
+@app.post("/chat")
+async def chat_endpoint(request: ChatRequest):
+    try:
+        et, st, gt = _resolve_timeouts(
+            request.timeout_s,
+            request.embedding_timeout_s,
+            request.search_timeout_s,
+            request.generate_timeout_s,
+        )
+
+        search_res = await _run_search(request.prompt, request.k, embedding_timeout_s=et, search_timeout_s=st)
+        docs = search_res["docs"]
+        context = search_res["context"]
+        timings = dict(search_res["timings"])
+
+        gen_res = await _run_generate(
+            prompt=request.prompt,
+            context=context,
+            model=request.model,
+            max_tokens=request.max_tokens,
+            generate_timeout_s=gt,
+        )
+        timings["generate_ms"] = gen_res["timings"]["generate_ms"]
+        timings["total_ms"] = int((timings.get("embedding_ms", 0) + timings.get("search_ms", 0) + timings.get("generate_ms", 0)))
+
+        app.state.last_request_timings = {"stage": "chat", **timings}
         try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    ollama.generate,
-                    model=request.model,
-                    prompt=full_prompt,
-                    options={"num_predict": request.max_tokens},
-                ),
-                timeout=request.timeout_s,
+            print(
+                json.dumps(
+                    {
+                        "ts": datetime.now(tz=timezone.utc).isoformat(),
+                        "event": "chat",
+                        "k": request.k,
+                        "model": request.model,
+                        "timings": timings,
+                    },
+                    ensure_ascii=False,
+                )
             )
-        except TimeoutError:
-            raise HTTPException(
-                status_code=504,
-                detail={"message": "生成（LLM応答）がタイムアウトしました", "timeout_s": request.timeout_s},
-            )
-
-        return {"answer": response.get("response", ""), "sources": _extract_sources(docs)}
+        except Exception:
+            pass
+        return {"answer": gen_res["answer"], "sources": _extract_sources(docs), "timings": timings}
     except HTTPException:
         raise
     except Exception as e:

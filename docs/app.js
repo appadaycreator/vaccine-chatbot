@@ -78,16 +78,33 @@ function addMessage(role, content, meta = {}) {
     div.appendChild(s);
   }
 
+  if (meta.timings) {
+    const t = meta.timings || {};
+    const parts = [];
+    if (typeof t.embedding_ms === "number") parts.push(`embedding ${t.embedding_ms}ms`);
+    if (typeof t.search_ms === "number") parts.push(`search ${t.search_ms}ms`);
+    if (typeof t.generate_ms === "number") parts.push(`generate ${t.generate_ms}ms`);
+    if (typeof t.total_ms === "number") parts.push(`total ${t.total_ms}ms`);
+    if (t.cached_embedding === true) parts.push("cache: hit");
+    if (t.cached_embedding === false) parts.push("cache: miss");
+    if (parts.length) {
+      const tm = document.createElement("div");
+      tm.className = "muted small";
+      tm.textContent = `timings: ${parts.join(" / ")}`;
+      div.appendChild(tm);
+    }
+  }
+
   root.appendChild(div);
   root.scrollTop = root.scrollHeight;
 }
 
-async function postChat({ apiBase, prompt, model, k }) {
-  const url = `${apiBase}/chat`;
+async function postJson(url, payload, { signal } = {}) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, model, k, max_tokens: 120, timeout_s: 120 }),
+    body: JSON.stringify(payload),
+    signal,
   });
   const bodyText = await res.text();
   let body;
@@ -98,9 +115,44 @@ async function postChat({ apiBase, prompt, model, k }) {
   }
   if (!res.ok) {
     const detail = body && body.detail ? body.detail : bodyText;
-    throw new Error(`HTTP ${res.status}: ${detail}`);
+    const err = new Error(`HTTP ${res.status}`);
+    err.status = res.status;
+    err.detail = detail;
+    err.body = body;
+    throw err;
   }
   return body;
+}
+
+async function postSearch({ apiBase, prompt, k, signal }) {
+  const url = `${apiBase}/search`;
+  return await postJson(
+    url,
+    {
+      prompt,
+      k,
+      timeout_s: 180,
+      embedding_timeout_s: 240,
+      search_timeout_s: 120,
+    },
+    { signal }
+  );
+}
+
+async function postGenerate({ apiBase, prompt, model, context, signal }) {
+  const url = `${apiBase}/generate`;
+  return await postJson(
+    url,
+    {
+      prompt,
+      model,
+      context,
+      max_tokens: 120,
+      timeout_s: 240,
+      generate_timeout_s: 240,
+    },
+    { signal }
+  );
 }
 
 async function getSources(apiBase) {
@@ -141,11 +193,35 @@ function setStatus(text, isError = false) {
   root.scrollTop = root.scrollHeight;
 }
 
+function setProgress(text, isError = false) {
+  const el = $("progress");
+  el.textContent = text || "";
+  el.classList.toggle("error", !!isError);
+}
+
+function formatApiError(err) {
+  const detail = err && err.detail ? err.detail : null;
+  if (detail && typeof detail === "object") {
+    const msg = detail.message || detail.error || JSON.stringify(detail);
+    const stage = detail.stage ? `stage=${detail.stage}` : "";
+    const code = detail.code ? `code=${detail.code}` : "";
+    const head = [msg, stage, code].filter(Boolean).join(" / ");
+    const hints =
+      Array.isArray(detail.hints) && detail.hints.length
+        ? "\n対処:\n" + detail.hints.map((x) => `- ${x}`).join("\n")
+        : "";
+    return `${head}${hints}`;
+  }
+  return err && err.message ? err.message : String(err);
+}
+
 function main() {
   const apiBaseEl = $("apiBase");
   const modelEl = $("model");
   const kEl = $("k");
   const promptEl = $("prompt");
+  const sendBtn = $("send");
+  const cancelBtn = $("cancel");
   const saveBtn = $("saveApiBase");
   const reloadBtn = $("reloadIndex");
   const sourcesStatusEl = $("sourcesStatus");
@@ -232,6 +308,21 @@ function main() {
     runReload();
   });
 
+  let currentController = null;
+
+  function setBusy(busy) {
+    sendBtn.disabled = !!busy;
+    promptEl.disabled = !!busy;
+    cancelBtn.hidden = !busy;
+    cancelBtn.disabled = !busy;
+  }
+
+  cancelBtn.addEventListener("click", () => {
+    if (currentController) {
+      currentController.abort();
+    }
+  });
+
   $("chatForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const apiBase = normalizeApiBase(apiBaseEl.value);
@@ -247,14 +338,39 @@ function main() {
     saveApiBase(apiBase);
     promptEl.value = "";
     addMessage("user", prompt);
-    setStatus("送信中…");
+    setStatus("送信しました。");
+    setBusy(true);
+    setProgress("処理中: 検索（embedding → 類似検索）…");
+    currentController = new AbortController();
 
     try {
-      const data = await postChat({ apiBase, prompt, model, k });
-      addMessage("assistant", data.answer || "", { model, sources: data.sources });
+      const searchRes = await postSearch({ apiBase, prompt, k, signal: currentController.signal });
+      setProgress("処理中: 生成…");
+      const genRes = await postGenerate({
+        apiBase,
+        prompt,
+        model,
+        context: searchRes.context || "",
+        signal: currentController.signal,
+      });
+      const timings = Object.assign({}, searchRes.timings || {}, genRes.timings || {});
+      if (typeof timings.total_ms !== "number") {
+        const a = typeof timings.embedding_ms === "number" ? timings.embedding_ms : 0;
+        const b = typeof timings.search_ms === "number" ? timings.search_ms : 0;
+        const c = typeof timings.generate_ms === "number" ? timings.generate_ms : 0;
+        timings.total_ms = a + b + c;
+      }
+      addMessage("assistant", genRes.answer || "", { model, sources: searchRes.sources, timings });
     } catch (err) {
-      setStatus(`エラー: ${err && err.message ? err.message : String(err)}`, true);
+      if (err && err.name === "AbortError") {
+        setStatus("キャンセルしました。");
+      } else {
+        setStatus(`エラー: ${formatApiError(err)}`, true);
+      }
     }
+    setBusy(false);
+    setProgress("");
+    currentController = null;
   });
 
   addMessage(

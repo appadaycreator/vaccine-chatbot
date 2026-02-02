@@ -179,16 +179,35 @@ curl -sS http://127.0.0.1:8000/status
 ### エンドポイント
 
 - `GET /health`: ヘルスチェック
+- `GET /status`: 状態確認（PDF数、初期化エラー、timings、embeddingウォームアップ/キャッシュなど）
 - `GET /sources`: 参照するPDF一覧
 - `POST /reload`: PDFを再インデックス（強制）
-- `POST /chat`: RAGで回答
+- `POST /search`: 検索（embedding → 類似検索）
+- `POST /generate`: 生成（LLM応答）
+- `POST /chat`: 検索＋生成（互換用。内部的には `/search`→`/generate` 相当）
 
 `POST /chat` の例:
 
 ```bash
 curl -X POST "http://localhost:8000/chat" \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"接種後7日間に記録する項目は？","model":"gemma2:2b","k":2,"max_tokens":120,"timeout_s":120}'
+  -d '{"prompt":"接種後7日間に記録する項目は？","model":"gemma2:2b","k":2,"max_tokens":120,"timeout_s":240,"embedding_timeout_s":240,"search_timeout_s":120,"generate_timeout_s":240}'
+```
+
+`POST /search`（検索のみ）:
+
+```bash
+curl -X POST "http://localhost:8000/search" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"接種後7日間に記録する項目は？","k":2,"embedding_timeout_s":240,"search_timeout_s":120}'
+```
+
+`POST /generate`（生成のみ。`/search` の `context` を渡す）:
+
+```bash
+curl -X POST "http://localhost:8000/generate" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"接種後7日間に記録する項目は？","model":"gemma2:2b","max_tokens":120,"generate_timeout_s":240,"context":"..."}'
 ```
 
 ### ベクトルDB（`chroma_db`）について
@@ -217,6 +236,23 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
 手元に `vaccine_manual.pdf` を置くか、`./pdfs/` にPDFを配置して利用してください。
 
 ## トラブルシューティング
+### 検索や生成が遅い / タイムアウトする
+
+遅い環境（Mac mini 等）でも「待てば返る」「どこが遅いか分かる」ように、処理を分割しています。
+
+- まず `GET /status` を確認（`ready` / `init_error` / `pdf_count` / `embed_warmup` / `last_request_timings`）
+- **embedding が遅い/失敗**:
+  - Ollama が起動しているか確認（例: `brew services start ollama`）
+  - `nomic-embed-text` が入っているか確認（`ollama pull nomic-embed-text`）
+  - 初回はモデル起動で遅くなります。しばらく待つか `embedding_timeout_s` を延長
+- **類似検索が遅い/失敗**:
+  - PDF数が多い場合は時間がかかります（`pdf_count` を確認）
+  - `k` を小さくして試す
+  - PDFを追加/更新したら `POST /reload` で再インデックス
+- **生成が遅い/失敗**:
+  - 軽量モデル（例: `gemma2:2b`）を試す
+  - 初回はモデル起動で遅くなります。しばらく待つか `generate_timeout_s` を延長
+
 
 ### `No matching distribution found for langchain-community==...` が出る
 
