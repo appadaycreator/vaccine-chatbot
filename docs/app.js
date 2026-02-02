@@ -1823,10 +1823,10 @@ function main() {
   // 例: よくある質問（ボタン）
   const quick = $("quickQuestions");
   const quickItems = [
-    "接種後7日間に記録する項目は？",
-    "37.5度以上の発熱が出たらどうすればいい？",
-    "接種部位の腫れ・痛みはどのくらい続く？（資料にある範囲で）",
-    "相談先（医療機関/自治体/119）の判断の目安は？",
+    "接種後に観察・記録すべき項目は？（資料にある範囲で）",
+    "接種後に起こりうる反応（発熱・痛み等）について、資料ではどう説明されていますか？",
+    "受診や相談が必要になる目安は？（資料にある範囲で）",
+    "相談先（医療機関・自治体の相談窓口など）はどこですか？（資料にある範囲で）",
   ];
   quick.innerHTML = quickItems
     .map((t) => `<button type="button" class="btn btn--secondary" data-q="${escapeHtml(t)}">例: ${escapeHtml(t)}</button>`)
