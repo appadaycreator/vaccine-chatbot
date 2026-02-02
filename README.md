@@ -128,15 +128,18 @@ curl -sS http://127.0.0.1:8000/status | python -m json.tool
 ## GitHub Pages（フロントエンド）で叩く
 
 `docs/` に GitHub Pages 用のシンプルなチャット画面（HTML/JS）を置いてあります。
-画面上部の **「環境チェック」** で、Ollama未起動・モデル未DLなどの“動かない原因”を確認できます。
+画面上部の **「環境チェック」** で、Ollamaが未起動・モデル未ダウンロードなどの“動かない原因”を確認できます。
 
 - GitHub Pages を `docs/` から配信するように設定（Settings → Pages → **Deploy from a branch** → **/docs**）
-- Pages を HTTPS で開き、API Base URL に `cloudflared` の公開URLを入力してテストします（初期値は空です）
+- Pages を HTTPS で開き、APIのURL に `cloudflared` の公開URLを入力してテストします（初期値は空です）
 
 ### 静的チャットUI（docs/）の操作（最低限のUX）
 
-- **送信中は多重実行しない**: 送信ボタン/入力欄を無効化（キャンセル可能）
-- **Enterで送信 / Shift+Enterで改行**
+- **主要操作はキーボードだけで完結**: スキップリンク（「チャット入力へ移動」）とフォーカス可視化（Tab移動）を実装
+- **送信中は多重実行しない**: 送信ボタンを無効化（入力欄は送信中のみ読み取り専用、キャンセル可能）
+- **処理段階の表示**: `/chat` の処理を **埋め込み → 検索 → 生成** の段階に分けて「いま何をしているか」を表示します（目安。直近の処理時間（内訳）をもとに推定）
+- **タイムアウト後の自己解決**: 失敗時は `detail.stage` を見て **次に試すこと**（例: `k` を下げる／軽量モデルへ切替）をボタンで提示します
+- **Enterキーで送信 / Shift+Enterで改行**
 - **入力履歴**: 入力欄の先頭/末尾で **↑↓** を押すと履歴を呼び出せます
 - **再送**: 最後の質問を「再送」でリトライできます
 - **エラー表示**: エラーはメッセージカードで **要点＋対処** を提示し、ログ全文は折りたたみ表示します
@@ -165,13 +168,13 @@ uvicorn api:app --host 127.0.0.1 --port 8000
 cloudflared tunnel --url http://localhost:8000
 ```
 
-ログに表示される `https://xxxx.trycloudflare.com` のようなURLを、GitHub Pagesの画面で **API Base URL** に貼り付けて `/chat` が叩けるか確認してください。
+ログに表示される `https://xxxx.trycloudflare.com` のようなURLを、GitHub Pagesの画面で **APIのURL** に貼り付けて `/chat` が叩けるか確認してください。
 
 ### 404（Not Found）が出る場合
 
 フロント（`docs/app.js`）は主に `POST /chat` を叩きますが、起動時に **環境チェック（`GET /diagnostics`）** と
 **参照ソース確認（`GET /sources`）** も行います。  
-これらが 404 の場合は、API Base URL が **FastAPI（uvicorn）ではなく別サービス（例: Streamlit 等）**を指している可能性が高いです。
+これらが 404 の場合は、APIのURL が **FastAPI（uvicorn）ではなく別サービス（例: Streamlit 等）**を指している可能性が高いです。
 
 - まず確認: `GET /health` と `GET /status` が返るか
 - 404 になる場合: `cloudflared tunnel --url http://localhost:8000` で発行されたURLを貼り直してください
@@ -271,6 +274,7 @@ curl -sS http://127.0.0.1:8000/status
   - `generate_ms`: 生成（LLM）
   - `total_ms`: 合計
 - **失敗理由**: `stage` / `code` / `message`（例: `EMBEDDING_TIMEOUT`, `SEARCH_TIMEOUT`, `GENERATE_TIMEOUT`, `INDEX_CHECK_TIMEOUT` など）
+  - `hints` は常に配列で返します（UIが一貫して「対処」を表示できるようにするため）
 
 補足:
 
@@ -331,11 +335,16 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
 
 ### できること
 
-- **ソース（根拠）の表示**: 回答の下に「参照ページ」を表示し、抜粋を展開できます
+- **ソース（根拠）の表示**: 回答の下に **資料名 + ページラベル（例: `[P3]`）** と **抜粋（前後数行）** を表示します（クリックで展開 / コピー可）
 - **サイドバー設定**:
   - 回答モデル切替（`gemma2` ↔ `llama3.1`）
   - 検索の強さ（k値）をスライダーで調整
 - **PDF配置で知識追加**: `./pdfs/` にPDFを置くと、次回の実行時に自動で再インデックスして検索対象に反映します
+
+根拠が取れない場合（`sources` が0件）の挙動:
+
+- **生成しない**: “それっぽい要約”を避けるため、LLM生成を行わず固定文（「資料にない」）を返します
+- **次のアクション提示（UI）**: GitHub Pages（`docs/`）側で、質問の言い換え候補をボタンで提示します
 
 ※初回はPDF解析・ベクトル化が走るため数分かかる場合があります。
 

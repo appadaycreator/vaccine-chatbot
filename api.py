@@ -234,7 +234,7 @@ async def _request_observability_middleware(request: Request, call_next):
 @app.exception_handler(HTTPException)
 async def _observability_http_exception_handler(request: Request, exc: HTTPException):
     rid = getattr(request.state, "request_id", None) or _new_request_id()
-    detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+    detail = _normalize_error_detail(exc.detail)
     stage = detail.get("stage") if isinstance(detail, dict) else None
     code = detail.get("code") if isinstance(detail, dict) else None
     timings = detail.get("timings") if isinstance(detail, dict) else None
@@ -519,22 +519,66 @@ def _format_context(docs) -> str:
     return "\n".join(lines)
 
 
+def _normalize_newlines(text: str) -> str:
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _make_excerpt(text: str, *, max_lines: int = 10, max_chars: int = 900) -> str:
+    """
+    根拠表示用の抜粋を作る（UIでそのまま表示できるよう改行を残す）。
+    - 行が多い場合は先頭/末尾を残して間を "…" にする（前後数行の雰囲気）。
+    """
+    raw = _normalize_newlines(text).strip()
+    if not raw:
+        return ""
+    lines = [ln.strip() for ln in raw.split("\n")]
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return ""
+
+    if len(lines) <= max_lines:
+        picked = lines
+    else:
+        head_n = max(1, max_lines // 2)
+        tail_n = max(1, max_lines - head_n - 1)
+        picked = lines[:head_n] + ["…"] + lines[-tail_n:]
+
+    out: list[str] = []
+    total = 0
+    for ln in picked:
+        # "…" は常に残す（長文切り捨ての合図）
+        if ln != "…" and total + len(ln) + 1 > max_chars:
+            break
+        out.append(ln)
+        total += len(ln) + 1
+        if total >= max_chars:
+            break
+    return "\n".join(out).strip()
+
+
 def _extract_sources(docs) -> list[dict[str, Any]]:
     sources: list[dict[str, Any]] = []
     seen: set[tuple[str | None, int | None]] = set()
     for doc in docs:
         meta = doc.metadata or {}
-        src = meta.get("source")
+        src = meta.get("source") or "資料"
         page = meta.get("page")
         page_num = page + 1 if isinstance(page, int) else None
         key = (src, page_num)
         if key in seen:
             continue
         seen.add(key)
-        excerpt = (doc.page_content or "").strip().replace("\n", " ")
-        if len(excerpt) > 300:
-            excerpt = excerpt[:300] + "…"
-        sources.append({"source": src, "page": page_num, "excerpt": excerpt})
+        page_label = f"[P{page_num}]" if isinstance(page_num, int) else "[P?]"
+        excerpt = _make_excerpt(doc.page_content or "")
+        sources.append(
+            {
+                "source": str(src),
+                "page": page_num,
+                "page_label": page_label,
+                "excerpt": excerpt,
+                "location": f"{src} {page_label}",
+            }
+        )
     return sources
 
 
@@ -1205,16 +1249,49 @@ def _http_error(
     extra: Optional[dict[str, Any]] = None,
     status_code: int = 500,
 ) -> None:
-    detail: dict[str, Any] = {"stage": stage, "code": code, "message": message}
+    detail: dict[str, Any] = {
+        "stage": str(stage or "unknown"),
+        "code": str(code or "UNKNOWN"),
+        "message": str(message or ""),
+        # UIが常に配列として扱えるよう、未指定でも空配列を入れる
+        "hints": [str(x) for x in (hints or [])],
+    }
     if timeout_s is not None:
         detail["timeout_s"] = int(timeout_s)
-    if hints:
-        detail["hints"] = hints
     if timings:
         detail["timings"] = timings
     if extra:
         detail.update(extra)
     raise HTTPException(status_code=status_code, detail=detail)
+
+
+def _normalize_error_detail(detail: Any) -> dict[str, Any]:
+    """
+    UIが stage/code/hints を前提にできるよう、HTTPException.detail を正規化する。
+    - stage/code/message: 常に文字列
+    - hints: 常に文字列配列
+    """
+    if isinstance(detail, dict):
+        d = dict(detail)
+    else:
+        d = {"message": str(detail)}
+
+    d.setdefault("stage", "unknown")
+    d.setdefault("code", "HTTP_ERROR")
+    d.setdefault("message", "")
+    d["stage"] = str(d.get("stage") or "unknown")
+    d["code"] = str(d.get("code") or "HTTP_ERROR")
+    d["message"] = str(d.get("message") or "")
+
+    hints = d.get("hints")
+    if isinstance(hints, list):
+        d["hints"] = [str(x) for x in hints]
+    elif hints is None:
+        d["hints"] = []
+    else:
+        d["hints"] = [str(hints)]
+
+    return d
 
 
 def _is_ollama_down_error(e: Exception) -> bool:

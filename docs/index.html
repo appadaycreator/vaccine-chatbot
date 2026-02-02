@@ -8,34 +8,35 @@
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
   </head>
   <body>
+    <a class="skip-link" href="#prompt">チャット入力へ移動</a>
     <header class="header">
       <div class="header__title">
         <h1>vaccine-chatbot</h1>
         <p class="muted">GitHub Pages から API（FastAPI）を叩く簡易チャットUI</p>
       </div>
       <div class="header__links">
-        <a href="./" aria-label="reload">reload</a>
+        <a href="./" aria-label="ページを再読み込み">再読み込み</a>
         <a href="./tech.html">利用技術</a>
       </div>
     </header>
 
-    <main class="main">
+    <main class="main" id="main">
       <section class="card">
         <h2>接続先</h2>
         <div class="row">
-          <label for="apiBase">API Base URL</label>
+          <label for="apiBase">APIのURL</label>
           <input
             id="apiBase"
             type="url"
             placeholder="https://xxxx.trycloudflare.com"
             autocomplete="off"
             spellcheck="false"
+            aria-describedby="apiBaseHelp"
           />
           <button id="saveApiBase" class="btn btn--secondary" type="button">保存</button>
         </div>
-        <p class="muted">
-          GitHub Pages（HTTPS）からは <code>http://localhost:8000</code> へ直接アクセスできません（Mixed
-          Content）。<br />
+        <p class="muted" id="apiBaseHelp">
+          GitHub Pages（HTTPS）からは <code>http://localhost:8000</code> へ直接アクセスできません（混在コンテンツ）。<br />
           <code>cloudflared tunnel --url http://localhost:8000</code> で発行される HTTPS URL を指定してください。
         </p>
       </section>
@@ -61,8 +62,11 @@
             </select>
           </div>
           <div class="field">
-            <label for="k">検索 k</label>
-            <input id="k" type="number" min="1" max="20" step="1" value="3" />
+            <label for="k">検索件数（k）</label>
+            <input id="k" type="number" min="1" max="20" step="1" value="3" aria-describedby="kHelp" />
+            <div class="muted small" id="kHelp">
+              数字が大きいほど、より多くの資料を候補として探します（遅くなる場合があります）。
+            </div>
           </div>
         </div>
       </section>
@@ -73,7 +77,7 @@
           <span id="diagOverall" class="pill pill--yellow">未確認</span>
         </div>
         <p class="muted">
-          Ollama未起動・モデル未DLなど、<strong>「なぜ動かないか」</strong>を表示します（APIの <code>/diagnostics</code> を参照）。
+          Ollamaが未起動・モデル未ダウンロードなど、<strong>「なぜ動かないか」</strong>を表示します（APIの <code>/diagnostics</code> を参照）。
         </p>
         <div class="muted small" id="diagSummary"></div>
         <div class="muted small error" id="diagError"></div>
@@ -84,14 +88,14 @@
         <h2>参照ソース（PDF一覧）</h2>
         <p class="muted">
           APIサーバー側で <code>PDF_DIR</code>（既定: <code>./pdfs</code>）に置かれたPDFを参照します。
-          反映が必要な場合はAPIの <code>/reload</code> で再インデックスできます。
+          反映が必要な場合はAPIの <code>/reload</code> で索引（検索の準備）を作り直せます。
         </p>
         <div class="row">
-          <label for="reloadIndex">再インデックス</label>
+          <label for="reloadIndex">資料の更新を反映</label>
           <div class="muted small">
-            PDFを追加・更新したあとに反映が遅い場合は、ここから強制的に再インデックスできます。
+            PDFを追加・更新したあとに反映が遅い場合は、ここから索引（検索の準備）を作り直して反映できます。
           </div>
-          <button id="reloadIndex" class="btn btn--secondary" type="button">再読み込み</button>
+          <button id="reloadIndex" class="btn btn--secondary" type="button">反映する</button>
         </div>
         <div class="muted small" id="sourcesStatus"></div>
         <div class="muted small" id="sourcesIndexing"></div>
@@ -102,7 +106,7 @@
 
       <section class="card card--chat">
         <h2>チャット</h2>
-        <div class="quick" id="quickQuestions" aria-label="例: よくある質問"></div>
+        <div class="quick" id="quickQuestions" aria-label="例（よくある質問）"></div>
         <div id="messages" class="messages" aria-live="polite"></div>
         <div id="progress" class="muted small progress" aria-live="polite"></div>
         <div id="guard" class="muted small error" aria-live="polite"></div>
@@ -120,7 +124,7 @@
           <button id="cancel" class="btn btn--secondary" type="button" hidden>キャンセル</button>
         </form>
         <div class="muted small">
-          入力: Enterで送信 / Shift+Enterで改行 / ↑↓で履歴<br />
+          操作: Enterキーで送信 / Shift+Enterで改行 / ↑↓で履歴<br />
           ヒント: URLに <code>?api=...</code> を付けても設定できます（例:
           <code>?api=https%3A%2F%2Fxxxx.trycloudflare.com</code>）
         </div>

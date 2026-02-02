@@ -34,7 +34,7 @@ function normalizeLevel(level) {
 
 function levelLabel(level) {
   const v = normalizeLevel(level);
-  if (v === "green") return "緑: OK";
+  if (v === "green") return "緑: 問題なし";
   if (v === "yellow") return "黄: 注意";
   return "赤: 要対応";
 }
@@ -42,6 +42,18 @@ function levelLabel(level) {
 function pillClass(level) {
   const v = normalizeLevel(level);
   return `pill pill--${v}`;
+}
+
+function stageLabel(stage) {
+  const s = String(stage || "").toLowerCase();
+  if (s === "embedding") return "embedding（質問をベクトル化）";
+  if (s === "search") return "search（資料から検索）";
+  if (s === "generate") return "generate（回答を生成）";
+  if (s === "index_check") return "index_check（PDF差分チェック）";
+  if (s === "index") return "index（再インデックス）";
+  if (s === "chat") return "chat";
+  if (s === "reload") return "reload";
+  return stage ? String(stage) : "";
 }
 
 function parseApiFromQuery() {
@@ -105,6 +117,169 @@ function renderMarkdown(md) {
   }
 }
 
+function truncateText(s, maxLen = 80) {
+  const t = String(s || "").trim();
+  if (!t) return "";
+  if (t.length <= maxLen) return t;
+  return t.slice(0, Math.max(0, maxLen - 1)) + "…";
+}
+
+async function copyToClipboard(text) {
+  const t = String(text || "");
+  if (!t) return false;
+  try {
+    if (navigator && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(t);
+      return true;
+    }
+  } catch {
+    /* noop */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.setAttribute("readonly", "readonly");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch {
+    return false;
+  }
+}
+
+function normalizePageLabel(x) {
+  if (x && typeof x.page_label === "string" && x.page_label.trim()) return x.page_label.trim();
+  if (x && typeof x.page === "number" && Number.isFinite(x.page)) return `[P${x.page}]`;
+  return "[P?]";
+}
+
+function sourceLocationLabel(x) {
+  if (x && typeof x.location === "string" && x.location.trim()) return x.location.trim();
+  const src = x && x.source ? String(x.source) : "資料";
+  return `${src} ${normalizePageLabel(x)}`.trim();
+}
+
+function normalizeExcerpt(x) {
+  const ex = x && typeof x.excerpt === "string" ? x.excerpt : "";
+  return String(ex).replaceAll("\r\n", "\n").replaceAll("\r", "\n").trim();
+}
+
+function renderSourcesCard(sources) {
+  const arr = Array.isArray(sources) ? sources : [];
+  if (!arr.length) return null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "sourcesCard";
+
+  const head = document.createElement("div");
+  head.className = "sourcesCard__head";
+  const title = document.createElement("div");
+  title.className = "sourcesCard__title";
+  title.textContent = "回答の根拠（引用）";
+  const tools = document.createElement("div");
+  tools.className = "sourcesCard__tools";
+
+  const copyAllBtn = document.createElement("button");
+  copyAllBtn.type = "button";
+  copyAllBtn.className = "btn btn--secondary sourcesCard__btn";
+  copyAllBtn.textContent = "根拠をまとめてコピー";
+  copyAllBtn.addEventListener("click", async () => {
+    const lines = arr.map((x) => {
+      const loc = sourceLocationLabel(x);
+      const ex = normalizeExcerpt(x);
+      return ex ? `${loc}\n${ex}` : `${loc}`;
+    });
+    await copyToClipboard(lines.join("\n\n"));
+  });
+  tools.appendChild(copyAllBtn);
+
+  head.appendChild(title);
+  head.appendChild(tools);
+  wrap.appendChild(head);
+
+  const list = document.createElement("div");
+  list.className = "sourcesCard__list";
+
+  for (const x of arr) {
+    const loc = sourceLocationLabel(x);
+    const ex = normalizeExcerpt(x);
+    const preview = truncateText((ex.split("\n").find((l) => l.trim()) || ex || "").trim(), 90);
+
+    const details = document.createElement("details");
+    details.className = "sourceItem";
+    const summary = document.createElement("summary");
+    summary.className = "sourceItem__summary";
+
+    const left = document.createElement("div");
+    left.className = "sourceItem__summaryLeft";
+    const locEl = document.createElement("div");
+    locEl.className = "sourceItem__loc";
+    locEl.textContent = loc;
+    const pv = document.createElement("div");
+    pv.className = "sourceItem__preview";
+    pv.textContent = preview || "（抜粋が空です）";
+    left.appendChild(locEl);
+    left.appendChild(pv);
+
+    const right = document.createElement("div");
+    right.className = "sourceItem__summaryRight";
+    const hint = document.createElement("div");
+    hint.className = "muted small";
+    hint.textContent = "クリックで展開";
+    right.appendChild(hint);
+
+    summary.appendChild(left);
+    summary.appendChild(right);
+    details.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "sourceItem__body";
+
+    const actions = document.createElement("div");
+    actions.className = "sourceItem__actions";
+
+    const copyLocBtn = document.createElement("button");
+    copyLocBtn.type = "button";
+    copyLocBtn.className = "btn btn--secondary sourcesCard__btn";
+    copyLocBtn.textContent = "資料名/ページをコピー";
+    copyLocBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      await copyToClipboard(loc);
+    });
+
+    const copyQuoteBtn = document.createElement("button");
+    copyQuoteBtn.type = "button";
+    copyQuoteBtn.className = "btn btn--secondary sourcesCard__btn";
+    copyQuoteBtn.textContent = "引用をコピー";
+    copyQuoteBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      await copyToClipboard(ex ? `${loc}\n${ex}` : loc);
+    });
+
+    actions.appendChild(copyLocBtn);
+    actions.appendChild(copyQuoteBtn);
+
+    const pre = document.createElement("pre");
+    pre.className = "sourceItem__excerpt";
+    pre.textContent = ex || "（この根拠には抜粋がありません）";
+
+    body.appendChild(actions);
+    body.appendChild(pre);
+    details.appendChild(body);
+
+    list.appendChild(details);
+  }
+
+  wrap.appendChild(list);
+  return wrap;
+}
+
 function addMessage(role, content, meta = {}) {
   const root = $("messages");
   const div = document.createElement("div");
@@ -120,11 +295,12 @@ function addMessage(role, content, meta = {}) {
 
   const metaDiv = document.createElement("div");
   metaDiv.className = "msg__meta";
-  const who = role === "user" ? "あなた" : role === "assistant" ? "AI" : role === "error" ? "エラー" : "システム";
+  const who =
+    role === "user" ? "あなた" : role === "assistant" ? "アシスタント" : role === "error" ? "エラー" : "システム";
   const left = document.createElement("span");
   left.textContent = `${who} · ${nowTime()}`;
   const right = document.createElement("span");
-  right.textContent = meta.model ? `model: ${meta.model}` : "";
+  right.textContent = meta.model ? `モデル: ${meta.model}` : "";
   metaDiv.appendChild(left);
   metaDiv.appendChild(right);
 
@@ -173,34 +349,24 @@ function addMessage(role, content, meta = {}) {
     div.appendChild(details);
   }
 
-  if (meta.sources && Array.isArray(meta.sources) && meta.sources.length) {
-    const s = document.createElement("div");
-    s.className = "sources";
-    const parts = meta.sources
-      .map((x) => {
-        const page = x && x.page ? `p.${x.page}` : "";
-        const src = x && x.source ? x.source : "";
-        const label = [src, page].filter(Boolean).join(" ");
-        return label ? `<code>${escapeHtml(label)}</code>` : null;
-      })
-      .filter(Boolean);
-    s.innerHTML = `根拠: ${parts.join(" ")} `;
-    div.appendChild(s);
+  if (meta && meta.sources && Array.isArray(meta.sources)) {
+    const card = renderSourcesCard(meta.sources);
+    if (card) div.appendChild(card);
   }
 
   if (meta.timings) {
     const t = meta.timings || {};
     const parts = [];
-    if (typeof t.embedding_ms === "number") parts.push(`embedding ${t.embedding_ms}ms`);
-    if (typeof t.search_ms === "number") parts.push(`search ${t.search_ms}ms`);
-    if (typeof t.generate_ms === "number") parts.push(`generate ${t.generate_ms}ms`);
-    if (typeof t.total_ms === "number") parts.push(`total ${t.total_ms}ms`);
-    if (t.cached_embedding === true) parts.push("cache: hit");
-    if (t.cached_embedding === false) parts.push("cache: miss");
+    if (typeof t.embedding_ms === "number") parts.push(`埋め込み: ${t.embedding_ms}ms`);
+    if (typeof t.search_ms === "number") parts.push(`検索: ${t.search_ms}ms`);
+    if (typeof t.generate_ms === "number") parts.push(`生成: ${t.generate_ms}ms`);
+    if (typeof t.total_ms === "number") parts.push(`合計: ${t.total_ms}ms`);
+    if (t.cached_embedding === true) parts.push("埋め込みキャッシュ: 利用");
+    if (t.cached_embedding === false) parts.push("埋め込みキャッシュ: 未利用");
     if (parts.length) {
       const tm = document.createElement("div");
       tm.className = "muted small";
-      tm.textContent = `timings: ${parts.join(" / ")}`;
+      tm.textContent = `処理時間: ${parts.join(" / ")}`;
       div.appendChild(tm);
     }
   }
@@ -225,7 +391,7 @@ async function postJson(url, payload, { signal } = {}) {
   }
   if (!res.ok) {
     const detail = body && body.detail ? body.detail : bodyText;
-    const err = new Error(`HTTP ${res.status}`);
+    const err = new Error(`通信エラー（状態コード: ${res.status}）`);
     err.status = res.status;
     err.detail = detail;
     err.body = body;
@@ -292,7 +458,14 @@ async function getSources(apiBase) {
   } catch {
     body = { raw: bodyText };
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${bodyText}`);
+  if (!res.ok) {
+    const err = new Error(`通信エラー（状態コード: ${res.status}）`);
+    err.status = res.status;
+    err.detail = body && body.detail ? body.detail : bodyText;
+    err.body = body;
+    err.raw = bodyText;
+    throw err;
+  }
   return body;
 }
 
@@ -307,7 +480,7 @@ async function getDiagnostics(apiBase, model) {
     body = { raw: bodyText };
   }
   if (!res.ok) {
-    const err = new Error(`HTTP ${res.status}`);
+    const err = new Error(`通信エラー（状態コード: ${res.status}）`);
     err.status = res.status;
     err.body = body;
     err.raw = bodyText;
@@ -327,7 +500,12 @@ async function reloadIndex(apiBase) {
   }
   if (!res.ok) {
     const detail = body && body.detail ? body.detail : bodyText;
-    throw new Error(`HTTP ${res.status}: ${detail}`);
+    const err = new Error(`通信エラー（状態コード: ${res.status}）`);
+    err.status = res.status;
+    err.detail = detail;
+    err.body = body;
+    err.raw = bodyText;
+    throw err;
   }
   return body;
 }
@@ -343,12 +521,115 @@ function setProgress(text, isError = false) {
   el.classList.toggle("error", !!isError);
 }
 
+function formatElapsedMs(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "";
+  const sec = n / 1000;
+  if (sec < 10) return `${sec.toFixed(1)}秒`;
+  return `${Math.round(sec)}秒`;
+}
+
+function loadLastChatTimings() {
+  try {
+    const raw = localStorage.getItem("lastChatTimings.v1");
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    return obj && typeof obj === "object" ? obj : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLastChatTimings(timings) {
+  try {
+    const t = timings && typeof timings === "object" ? timings : null;
+    if (!t) return;
+    const out = {
+      embedding_ms: typeof t.embedding_ms === "number" ? t.embedding_ms : null,
+      search_ms: typeof t.search_ms === "number" ? t.search_ms : null,
+      generate_ms: typeof t.generate_ms === "number" ? t.generate_ms : null,
+      total_ms: typeof t.total_ms === "number" ? t.total_ms : null,
+    };
+    localStorage.setItem("lastChatTimings.v1", JSON.stringify(out));
+  } catch {
+    /* noop */
+  }
+}
+
+function estimateChatStageBudgetsMs({ lastTimings, timeouts } = {}) {
+  const last = lastTimings && typeof lastTimings === "object" ? lastTimings : {};
+  const t = timeouts && typeof timeouts === "object" ? timeouts : {};
+
+  const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
+  const n = (x) => (typeof x === "number" && Number.isFinite(x) ? x : null);
+
+  const lastEmbed = n(last.embedding_ms);
+  const lastSearch = n(last.search_ms);
+  const lastGen = n(last.generate_ms);
+
+  // “前回+少し余裕” を基本にして工程切替を推定（初回は固定値）
+  const embedBudget = clamp(Math.round(lastEmbed ? lastEmbed * 1.3 : 1200), 700, 15000);
+  const searchBudget = clamp(Math.round(lastSearch ? lastSearch * 1.3 : 1200), 700, 20000);
+  const genBudget = clamp(Math.round(lastGen ? lastGen * 1.3 : 3500), 900, 45000);
+
+  // UI表示の上限がタイムアウトを超えないよう抑える（表示が不自然に長引かないように）
+  const etMs = typeof t.embedding_timeout_s === "number" ? Math.round(t.embedding_timeout_s * 1000) : null;
+  const stMs = typeof t.search_timeout_s === "number" ? Math.round(t.search_timeout_s * 1000) : null;
+  const gtMs = typeof t.generate_timeout_s === "number" ? Math.round(t.generate_timeout_s * 1000) : null;
+
+  return {
+    embedding_ms: etMs ? Math.min(embedBudget, Math.max(1200, Math.round(etMs * 0.8))) : embedBudget,
+    search_ms: stMs ? Math.min(searchBudget, Math.max(1200, Math.round(stMs * 0.8))) : searchBudget,
+    generate_ms: gtMs ? Math.min(genBudget, Math.max(1800, Math.round(gtMs * 0.85))) : genBudget,
+  };
+}
+
+function startChatStageProgress({ lastTimings, timeouts, onUpdate } = {}) {
+  const budgets = estimateChatStageBudgetsMs({ lastTimings, timeouts });
+  const t0 = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+
+  function stageFromElapsed(elapsedMs) {
+    if (elapsedMs < budgets.embedding_ms) return "embedding";
+    if (elapsedMs < budgets.embedding_ms + budgets.search_ms) return "search";
+    return "generate";
+  }
+
+  function makeText(stage, elapsedMs) {
+    const el = formatElapsedMs(elapsedMs);
+    const base = `処理中: ${stageLabel(stage)}…`;
+    const suffix = el ? `（${el}）` : "";
+    const long =
+      elapsedMs > budgets.embedding_ms + budgets.search_ms + budgets.generate_ms
+        ? " 長い場合は k を下げる／軽量モデルを試すのが有効です。"
+        : "";
+    return `${base}${suffix}${long}`;
+  }
+
+  let id = null;
+  const tick = () => {
+    const now = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+    const elapsedMs = Math.max(0, now - t0);
+    const stage = stageFromElapsed(elapsedMs);
+    try {
+      onUpdate && onUpdate(makeText(stage, elapsedMs), false, { stage, elapsedMs });
+    } catch {
+      /* noop */
+    }
+  };
+
+  tick();
+  id = setInterval(tick, 250);
+  return () => {
+    if (id) clearInterval(id);
+  };
+}
+
 function formatApiError(err) {
   const detail = err && err.detail ? err.detail : null;
   if (detail && typeof detail === "object") {
     const msg = detail.message || detail.error || JSON.stringify(detail);
-    const stage = detail.stage ? `stage=${detail.stage}` : "";
-    const code = detail.code ? `code=${detail.code}` : "";
+    const stage = detail.stage ? `段階: ${stageLabel(detail.stage)}` : "";
+    const code = detail.code ? `コード: ${detail.code}` : "";
     const head = [msg, stage, code].filter(Boolean).join(" / ");
     const hints =
       Array.isArray(detail.hints) && detail.hints.length
@@ -369,7 +650,7 @@ function extractApiErrorHints(err) {
 
 function summarizeApiError(err) {
   const parts = [];
-  if (err && typeof err.status === "number") parts.push(`HTTP ${err.status}`);
+  if (err && typeof err.status === "number") parts.push(`状態コード: ${err.status}`);
   const msg = err && err.message ? String(err.message) : "";
   if (msg && !parts.includes(msg)) parts.push(msg);
   const detail = err && err.detail ? err.detail : null;
@@ -377,9 +658,9 @@ function summarizeApiError(err) {
   if (detail && typeof detail === "object") {
     const m = detail.message || detail.error;
     if (m) parts.push(String(m));
-    const stage = detail.stage ? `stage=${detail.stage}` : "";
-    const code = detail.code ? `code=${detail.code}` : "";
-    const extra = [stage, code].filter(Boolean).join(" ");
+    const stage = detail.stage ? `段階: ${stageLabel(detail.stage)}` : "";
+    const code = detail.code ? `コード: ${detail.code}` : "";
+    const extra = [stage, code].filter(Boolean).join(" / ");
     if (extra) parts.push(extra);
   }
   const text = parts.filter(Boolean).join(" / ");
@@ -408,7 +689,7 @@ function main() {
   const diagListEl = $("diagList");
 
   // /diagnostics が未実装のAPI（またはAPI以外）を指すと 404 が定期的に出るため、
-  // 一度 404 を検出したらポーリングを止め、ユーザーが API Base URL を見直せるようにする。
+  // 一度 404 を検出したらポーリングを止め、ユーザーが APIのURL を見直せるようにする。
   let diagPollId = null;
   let diagUnsupportedFor = null;
 
@@ -421,7 +702,7 @@ function main() {
     const v = normalizeApiBase(apiBaseEl.value);
     saveApiBase(v);
     diagUnsupportedFor = null;
-    setStatus(`保存しました: ${v}`);
+    setStatus(`保存しました（APIのURL）: ${v}`);
     refreshSources();
     refreshDiagnostics();
     // 404 でポーリング停止していた場合に備えて復帰させる
@@ -440,12 +721,19 @@ function main() {
     try {
       const data = await getSources(apiBase);
       if (!data.ok) {
-        sourcesStatusEl.textContent = `ソース一覧取得に失敗: ${data.error || ""}`;
+        sourcesStatusEl.textContent = `参照ソースの取得に失敗しました。`;
+        const lines = [
+          `要点: 参照ソースの取得に失敗しました（${data.error || "詳細不明"}）`,
+          "",
+          "対処:",
+          "- APIのURLが正しいか確認してください",
+          "- そのURLで /health と /status が開けるか確認してください",
+        ];
+        sourcesErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
         sourcesListEl.textContent = "";
         sourcesIndexingEl.textContent = "";
-        sourcesErrorEl.textContent = "";
         sourcesNextActionsEl.textContent = "";
-        setGuardReason("sources", true, "参照ソース情報を取得できませんでした（API Base URL を確認してください）。");
+        setGuardReason("sources", true, "参照ソース情報を取得できませんでした（APIのURLを確認してください）。");
         return null;
       }
       const indexed = typeof data.indexed === "boolean" ? data.indexed : null;
@@ -455,12 +743,12 @@ function main() {
       sourcesStatusEl.textContent =
         indexed === null
           ? `登録済みソース: ${data.items.length} 件${last}`
-          : `登録済みソース: ${data.items.length} 件（${indexed ? "インデックス済" : "未インデックス"}）${last}`;
+          : `登録済みソース: ${data.items.length} 件（${indexed ? "検索の準備: 完了" : "検索の準備: 未完了"}）${last}`;
 
       // インデックス実行状況
       if (running) {
         const startedAt = indexing && indexing.started_at ? `開始: ${String(indexing.started_at)}` : "";
-        sourcesIndexingEl.textContent = `再インデックス実行中… ${startedAt}`;
+        sourcesIndexingEl.textContent = `反映処理中… ${startedAt}`;
       } else {
         sourcesIndexingEl.textContent = "";
       }
@@ -485,14 +773,14 @@ function main() {
         ? escapeHtml("次にやること:\n- " + next.join("\n- ")).replaceAll("\n", "<br>")
         : "";
 
-      // 送信ガード（未完了/実行中は送信不可）
+      // 送信ガード（準備中/実行中は送信不可）
       if (running) {
-        setGuardReason("sources", true, "インデックス実行中のため、完了するまで送信できません。");
+        setGuardReason("sources", true, "資料の反映処理中のため、完了するまで送信できません。");
       } else if (indexed === false) {
         if (!data.items || !data.items.length) {
           setGuardReason("sources", true, "PDFが未配置のため送信できません。上の「次にやること」を実施してください。");
         } else {
-          setGuardReason("sources", true, "インデックス未完了のため送信できません（必要に応じて「再インデックス」を実行）。");
+          setGuardReason("sources", true, "検索の準備が未完了のため送信できません（必要に応じて「反映する」を実行）。");
         }
       } else {
         setGuardReason("sources", false, "");
@@ -517,7 +805,7 @@ function main() {
           if (it && typeof it.size_bytes === "number") meta.push(`${Math.round(it.size_bytes / 1024)}KB`);
           if (it && it.ingest && typeof it.ingest === "object") {
             const st = it.ingest.status ? String(it.ingest.status) : "";
-            if (st === "ocr_needed") meta.push("要OCR（テキスト抽出不可）");
+            if (st === "ocr_needed") meta.push("文字認識（OCR）が必要（文字を取り出せません）");
             if (st === "error") meta.push("取込失敗");
           }
           const metaHtml = meta.length
@@ -529,12 +817,19 @@ function main() {
       sourcesListEl.innerHTML = `<ul class="sources-list">${rows}</ul>`;
       return data;
     } catch (e) {
-      sourcesStatusEl.textContent = `ソース一覧取得に失敗: ${e && e.message ? e.message : String(e)}`;
+      sourcesStatusEl.textContent = `参照ソースの取得に失敗しました。`;
+      const lines = [
+        `要点: 参照ソースの取得に失敗しました（${summarizeApiError(e)}）`,
+        "",
+        "対処:",
+        "- APIのURLが正しいか確認してください",
+        "- そのURLで /health と /status が開けるか確認してください",
+      ];
       sourcesListEl.textContent = "";
       sourcesIndexingEl.textContent = "";
-      sourcesErrorEl.textContent = "";
+      sourcesErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
       sourcesNextActionsEl.textContent = "";
-      setGuardReason("sources", true, "参照ソース情報を取得できませんでした（API Base URL を確認してください）。");
+      setGuardReason("sources", true, "参照ソース情報を取得できませんでした（APIのURLを確認してください）。");
       return null;
     }
   }
@@ -550,7 +845,14 @@ function main() {
         diagOverallEl.className = "pill pill--yellow";
         diagOverallEl.textContent = "未確認";
         diagSummaryEl.textContent = "";
-        diagErrorEl.textContent = "環境チェックの取得に失敗しました。";
+        const lines = [
+          "要点: 環境チェックの取得に失敗しました。",
+          "",
+          "対処:",
+          "- APIのURLが正しいか確認してください",
+          "- そのURLで /health と /status が開けるか確認してください",
+        ];
+        diagErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
         diagListEl.innerHTML = "";
         setGuardReason("diagnostics", false, "");
         return null;
@@ -609,10 +911,10 @@ function main() {
         // 通常運用の導線: URLが FastAPI 以外（例: Streamlit / 静的ホスティング等）を指しているケースが多い
         // “未対応”ではなく、ユーザーが最短で復旧できるように「何を直すか」を表示する
         const lines = [
-          "環境チェック（/diagnostics）が見つかりませんでした（HTTP 404）。",
+          "環境チェック（/diagnostics）が見つかりませんでした（状態コード: 404）。",
           "",
           "まず確認すること:",
-          "- API Base URL が FastAPI（uvicorn）を指しているか",
+          "- APIのURLが FastAPI（uvicorn）を指しているか",
           "- そのURLで /health と /status が開けるか",
           "",
           "よくある原因:",
@@ -620,7 +922,7 @@ function main() {
           "- ポート番号/転送先が違う",
           "",
           "対処:",
-          "- API Base URL を正しいURLに貼り替えて「保存」を押してください",
+          "- APIのURLを正しいURLに貼り替えて「保存」を押してください",
         ];
         diagErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
         diagUnsupportedFor = apiBase;
@@ -629,7 +931,15 @@ function main() {
           diagPollId = null;
         }
       } else {
-        diagErrorEl.textContent = `環境チェックの取得に失敗: ${summarizeApiError(e)}`;
+        const lines = [
+          `要点: 環境チェックの取得に失敗しました（${summarizeApiError(e)}）`,
+          "",
+          "対処:",
+          "- APIのURLが正しいか確認してください",
+          "- そのURLで /health と /status が開けるか確認してください",
+          "- 一時的な問題なら、少し待ってからもう一度お試しください",
+        ];
+        diagErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
       }
       diagListEl.innerHTML = "";
       setGuardReason("diagnostics", false, "");
@@ -640,7 +950,7 @@ function main() {
   async function runReload() {
     const apiBase = normalizeApiBase(apiBaseEl.value);
     if (!apiBase) {
-      setStatus("API Base URL を入力してください。", true);
+      setStatus("APIのURLを入力してください。", true);
       return;
     }
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -661,39 +971,39 @@ function main() {
 
     const prevText = reloadBtn.textContent;
     reloadBtn.disabled = true;
-    reloadBtn.textContent = "再インデックス中…";
-    sourcesStatusEl.textContent = "再インデックス中…（しばらくお待ちください）";
+    reloadBtn.textContent = "反映中…";
+    sourcesStatusEl.textContent = "反映中…（しばらくお待ちください）";
     try {
       const res = await reloadIndex(apiBase);
       // 202 で「開始」なので、ここでは完了扱いしない
-      setStatus((res && res.message) || "再インデックスを開始しました。完了までお待ちください。");
+      setStatus((res && res.message) || "反映処理を開始しました。完了までお待ちください。");
       const finalData = await waitForIndexCompletion();
       if (finalData && finalData.indexed === true) {
-        setStatus("再インデックスが完了しました。");
+        setStatus("反映が完了しました。");
       } else if (finalData && finalData.error) {
         const msg =
           finalData.error && typeof finalData.error === "object" && finalData.error.message
             ? String(finalData.error.message)
-            : "再インデックスに失敗しました（エラー内容を確認してください）。";
+            : "反映に失敗しました（エラー内容を確認してください）。";
         setStatus(msg, true);
       }
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
       // 409: すでに実行中（サーバー側で多重実行防止）
-      if (String(msg).includes("HTTP 409")) {
-        setStatus("すでに再インデックスが実行中です。完了までお待ちください。", true);
+      if (e && typeof e.status === "number" && e.status === 409) {
+        setStatus("すでに反映処理が実行中です。完了までお待ちください。", true);
         await waitForIndexCompletion();
       } else {
-        setStatus(`再インデックス失敗: ${msg}`, true);
+        setStatus(`反映に失敗しました: ${msg}`, true);
         await refreshSources();
       }
     } finally {
       const d = await refreshSources();
       const running = !!(d && d.indexing && d.indexing.running === true);
       if (!running) {
-        reloadBtn.textContent = prevText || "再読み込み";
+        reloadBtn.textContent = prevText || "反映する";
       } else {
-        reloadBtn.textContent = "再インデックス中…";
+        reloadBtn.textContent = "反映中…";
       }
       // disabled は refreshSources() が（実行中なら）制御する
     }
@@ -724,7 +1034,9 @@ function main() {
   function updateComposerState() {
     const blocked = !!busy || !!guard.blocked;
     sendBtn.disabled = blocked;
-    promptEl.disabled = blocked;
+    // disabled にするとフォーカスが飛びやすいので、送信中のみ readOnly にする
+    promptEl.disabled = false;
+    promptEl.readOnly = !!busy;
     cancelBtn.hidden = !busy;
     cancelBtn.disabled = !busy;
     resendBtn.disabled = blocked || !(lastUserPrompt || "").trim();
@@ -786,6 +1098,17 @@ function main() {
 
   history = loadHistory();
 
+  function buildRewriteSuggestions(q) {
+    const base = String(q || "").trim();
+    if (!base) return [];
+    // UIテンプレ（LLMは使わず、固定の言い換え促しで次アクションを提示）
+    return [
+      `${base}（対象ワクチン名・接種後の日数・症状/数値など条件を入れて、資料の記載を確認したい）`,
+      `「${base}」について、資料の見出し/項目名（チェックリスト名・表の項目名）を教えてください`,
+      `資料に「${base}」の類語（別の言い方）があれば教えてください（資料の用語で質問したい）`,
+    ];
+  }
+
   async function sendPrompt(prompt, { isResend = false } = {}) {
     if (busy) return;
     const apiBase = normalizeApiBase(apiBaseEl.value);
@@ -793,14 +1116,14 @@ function main() {
     const k = Number(kEl.value || 3);
     const p = String(prompt || "").trim();
     if (!apiBase) {
-      addMessage("error", "API Base URL を入力してください。", {
+      addMessage("error", "APIのURLを入力してください。", {
         actions: [],
         details: null,
       });
       return;
     }
     if (guard && guard.blocked) {
-      addMessage("error", guard.reason || "インデックス未完了のため送信できません。", {});
+      addMessage("error", guard.reason || "検索の準備が未完了のため送信できません。", {});
       return;
     }
     if (!p) return;
@@ -814,7 +1137,12 @@ function main() {
     pushHistory(p);
 
     setBusy(true);
-    setProgress("処理中: /chat（検索＋生成）…");
+    const chatTimeouts = { embedding_timeout_s: 240, search_timeout_s: 120, generate_timeout_s: 240 };
+    const stopProgress = startChatStageProgress({
+      lastTimings: loadLastChatTimings(),
+      timeouts: chatTimeouts,
+      onUpdate: (text, isError) => setProgress(text, !!isError),
+    });
     currentController = new AbortController();
 
     try {
@@ -826,38 +1154,128 @@ function main() {
         const c = typeof timings.generate_ms === "number" ? timings.generate_ms : 0;
         timings.total_ms = a + b + c;
       }
+      const sources = chatRes && Array.isArray(chatRes.sources) ? chatRes.sources : null;
+      const noSources = Array.isArray(sources) && sources.length === 0;
+      const actions = noSources
+        ? buildRewriteSuggestions(p).map((text) => ({
+            label: `言い換え案: ${truncateText(text, 16)}`,
+            kind: "secondary",
+            onClick: () => {
+              promptEl.value = text;
+              promptEl.focus();
+            },
+          }))
+        : [];
       addMessage("assistant", (chatRes && chatRes.answer) || "", {
         model,
-        sources: chatRes && chatRes.sources ? chatRes.sources : null,
+        sources,
         timings,
+        actions: actions.length ? actions : null,
       });
+      saveLastChatTimings(timings);
     } catch (err) {
+      try {
+        stopProgress && stopProgress();
+      } catch {
+        /* noop */
+      }
       if (err && err.name === "AbortError") {
         addMessage("system", "キャンセルしました。", {});
       } else {
+        const detail = err && err.detail && typeof err.detail === "object" ? err.detail : null;
+        const stage = detail && detail.stage ? String(detail.stage) : "";
+        const code = detail && detail.code ? String(detail.code) : "";
         const hints = extractApiErrorHints(err);
         const summary = summarizeApiError(err);
         const baseHints = [];
         if (err && err.status === 404) {
           baseHints.push(
-            "API Base URL が FastAPI（uvicorn）を指しているか確認してください（例: cloudflared tunnel --url http://localhost:8000）。"
+            "APIのURLが FastAPI（uvicorn）を指しているか確認してください（例: cloudflared tunnel --url http://localhost:8000）。"
           );
         }
         if (err && err.status === 0) {
-          baseHints.push("ネットワーク接続・CORS・API Base URL を確認してください。");
+          baseHints.push("ネットワーク接続・CORS・APIのURLを確認してください。");
         }
-        const allHints = [...baseHints, ...hints].filter(Boolean);
-        const hintText = allHints.length ? "対処:\n- " + allHints.join("\n- ") : "対処:\n- API Base URL とサーバー状態（/health）を確認してください。";
 
-        addMessage("error", `${summary}\n\n${hintText}`, {
-          actions: [
+        const stageHints = [];
+        if (stage) {
+          const st = String(stage).toLowerCase();
+          if (st === "search") {
+            stageHints.push("検索が遅い場合は k を小さくすると改善することがあります（例: 3→2→1）。");
+          } else if (st === "generate") {
+            stageHints.push("生成が遅い場合は軽量モデル（例: gemma2:2b）に切り替えると改善することがあります。");
+          } else if (st === "embedding") {
+            stageHints.push("embedding が遅い/失敗する場合は Ollama 起動・Embeddingモデルの有無を確認してください。");
+          } else if (st === "index_check" || st === "index") {
+            stageHints.push("PDF追加直後は差分チェック/再インデックスで重くなることがあります。少し待って再送してください。");
+          }
+        }
+
+        const allHints = [...baseHints, ...stageHints, ...hints].filter(Boolean);
+        const hintText = allHints.length
+          ? "対処:\n- " + allHints.join("\n- ")
+          : "対処:\n- APIのURLとサーバー状態（/health）を確認してください。";
+
+        const actions = [
+          {
+            label: "再送",
+            kind: "secondary",
+            disabled: !(lastUserPrompt || "").trim(),
+            onClick: () => sendPrompt(lastUserPrompt, { isResend: true }),
+          },
+        ];
+
+        // タイムアウト等の“自己解決”導線（stageベース）
+        const st = stage ? String(stage).toLowerCase() : "";
+        if (st === "search") {
+          actions.unshift(
             {
-              label: "再送",
+              label: "k=2 にして再送",
               kind: "secondary",
               disabled: !(lastUserPrompt || "").trim(),
-              onClick: () => sendPrompt(lastUserPrompt, { isResend: true }),
+              onClick: () => {
+                try {
+                  kEl.value = "2";
+                } catch {
+                  /* noop */
+                }
+                sendPrompt(lastUserPrompt, { isResend: true });
+              },
             },
-          ],
+            {
+              label: "k=1 にして再送",
+              kind: "secondary",
+              disabled: !(lastUserPrompt || "").trim(),
+              onClick: () => {
+                try {
+                  kEl.value = "1";
+                } catch {
+                  /* noop */
+                }
+                sendPrompt(lastUserPrompt, { isResend: true });
+              },
+            }
+          );
+        }
+        if (st === "generate") {
+          actions.unshift({
+            label: "モデルを gemma2:2b にして再送",
+            kind: "secondary",
+            disabled: !(lastUserPrompt || "").trim(),
+            onClick: () => {
+              try {
+                modelEl.value = "gemma2:2b";
+              } catch {
+                /* noop */
+              }
+              sendPrompt(lastUserPrompt, { isResend: true });
+            },
+          });
+        }
+
+        const stageInfo = stage ? `詰まった工程: ${stageLabel(stage)}${code ? ` / code=${code}` : ""}` : "";
+        addMessage("error", `${summary}${stageInfo ? `\n${stageInfo}` : ""}\n\n${hintText}`, {
+          actions,
           details: safeJsonStringify({
             status: err && err.status ? err.status : null,
             message: err && err.message ? err.message : null,
@@ -870,6 +1288,11 @@ function main() {
       }
     } finally {
       setBusy(false);
+      try {
+        stopProgress && stopProgress();
+      } catch {
+        /* noop */
+      }
       setProgress("");
       currentController = null;
     }
@@ -957,7 +1380,7 @@ function main() {
 
   addMessage(
     "assistant",
-    "API Base URL を設定して、質問を送ってください。\n\n（cloudflaredのURLを貼ればGitHub Pagesからでも叩けます）"
+    "APIのURLを設定してから、質問を送ってください。\n\n（cloudflared の HTTPS URL を貼れば、GitHub Pages からでも利用できます）"
   );
 
   refreshSources();

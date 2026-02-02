@@ -76,6 +76,36 @@ def _normalize_docs_source(docs, source_label: str):
     return docs
 
 
+def _normalize_newlines(text: str) -> str:
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _make_excerpt(text: str, max_lines: int = 10, max_chars: int = 900) -> str:
+    raw = _normalize_newlines(text).strip()
+    if not raw:
+        return ""
+    lines = [ln.strip() for ln in raw.split("\n")]
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return ""
+    if len(lines) <= max_lines:
+        picked = lines
+    else:
+        head_n = max(1, max_lines // 2)
+        tail_n = max(1, max_lines - head_n - 1)
+        picked = lines[:head_n] + ["…"] + lines[-tail_n:]
+    out: list[str] = []
+    total = 0
+    for ln in picked:
+        if ln != "…" and total + len(ln) + 1 > max_chars:
+            break
+        out.append(ln)
+        total += len(ln) + 1
+        if total >= max_chars:
+            break
+    return "\n".join(out).strip()
+
+
 @st.cache_resource(show_spinner=False)
 def _build_vectorstore_from_paths(paths: list[str], signature: str):
     # signature はキャッシュキー安定化のため
@@ -184,21 +214,14 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
         if message["role"] == "assistant" and message.get("sources"):
             sources = message["sources"]
-            pages = []
-            for s in sources:
-                if s.get("page") is not None:
-                    pages.append(f"{s.get('source','資料')} p.{s['page']}")
-                else:
-                    pages.append(f"{s.get('source','資料')}")
-            st.markdown("**根拠（参照ページ）**: " + " / ".join(pages))
+            locs = [str(s.get("location") or f"{s.get('source','資料')} {s.get('page_label','[P?]')}") for s in sources]
+            st.markdown("**根拠（引用）**: " + " / ".join(locs))
             with st.expander("根拠の抜粋を表示"):
                 for s in sources:
-                    title = f"{s.get('source','資料')}"
-                    if s.get("page") is not None:
-                        title += f" p.{s['page']}"
+                    title = str(s.get("location") or f"{s.get('source','資料')} {s.get('page_label','[P?]')}")
                     st.markdown(f"- {title}")
                     if s.get("excerpt"):
-                        st.caption(s["excerpt"])
+                        st.code(str(s["excerpt"]))
 
 
 def _extract_sources(docs):
@@ -213,10 +236,17 @@ def _extract_sources(docs):
         if key in seen:
             continue
         seen.add(key)
-        excerpt = (d.page_content or "").strip().replace("\n", " ")
-        if len(excerpt) > 400:
-            excerpt = excerpt[:400] + "…"
-        sources.append({"source": src, "page": page_num, "excerpt": excerpt})
+        page_label = f"[P{page_num}]" if isinstance(page_num, int) else "[P?]"
+        excerpt = _make_excerpt(d.page_content or "")
+        sources.append(
+            {
+                "source": str(src),
+                "page": page_num,
+                "page_label": page_label,
+                "excerpt": excerpt,
+                "location": f"{src} {page_label}",
+            }
+        )
     return sources
 
 # ユーザー入力
@@ -250,21 +280,14 @@ if prompt:
 
             st.markdown(answer)
             if sources:
-                pages = []
-                for s in sources:
-                    if s.get("page") is not None:
-                        pages.append(f"{s.get('source','資料')} p.{s['page']}")
-                    else:
-                        pages.append(f"{s.get('source','資料')}")
-                st.markdown("**根拠（参照ページ）**: " + " / ".join(pages))
+                locs = [str(s.get("location") or f"{s.get('source','資料')} {s.get('page_label','[P?]')}") for s in sources]
+                st.markdown("**根拠（引用）**: " + " / ".join(locs))
                 with st.expander("根拠の抜粋を表示"):
                     for s in sources:
-                        title = f"{s.get('source','資料')}"
-                        if s.get("page") is not None:
-                            title += f" p.{s['page']}"
+                        title = str(s.get("location") or f"{s.get('source','資料')} {s.get('page_label','[P?]')}")
                         st.markdown(f"- {title}")
                         if s.get("excerpt"):
-                            st.caption(s["excerpt"])
+                            st.code(str(s["excerpt"]))
 
             st.session_state.messages.append({"role": "assistant", "content": answer, "sources": sources})
         except Exception as e:

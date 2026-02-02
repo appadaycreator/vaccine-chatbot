@@ -8,6 +8,8 @@
   --accent: #7aa2ff;
   --accent-2: #6ee7b7;
   --danger: #fb7185;
+  --focus: rgba(250, 204, 21, 0.95);
+  --focusShadow: rgba(250, 204, 21, 0.18);
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
   --radius: 14px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
@@ -30,7 +32,39 @@ body {
   background: radial-gradient(1200px 700px at 20% 10%, rgba(122, 162, 255, 0.25), transparent),
     radial-gradient(1000px 600px at 80% 0%, rgba(110, 231, 183, 0.18), transparent), var(--bg);
   color: var(--text);
+  line-height: 1.55;
 }
+.skip-link {
+  position: absolute;
+  left: 12px;
+  top: -60px;
+  z-index: 999;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.88);
+  color: var(--text);
+  border: 2px solid var(--focus);
+  text-decoration: none;
+}
+
+.skip-link:focus-visible {
+  top: 12px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 4px var(--focusShadow);
+}
+
+.header__links a:hover {
+  color: var(--text);
+}
+
+.header__links a:focus-visible {
+  color: var(--text);
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: 8px;
+}
+
 
 code {
   font-family: var(--mono);
@@ -130,9 +164,9 @@ select {
   outline: none;
 }
 
-input:focus,
-textarea:focus,
-select:focus {
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
   border-color: rgba(122, 162, 255, 0.8);
   box-shadow: 0 0 0 4px rgba(122, 162, 255, 0.18);
 }
@@ -154,6 +188,15 @@ textarea {
 
 .btn:hover {
   background: rgba(122, 162, 255, 0.26);
+}
+
+.btn:focus-visible,
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 4px var(--focusShadow);
 }
 
 .btn--secondary {
@@ -324,6 +367,104 @@ textarea {
 
 .sources code {
   font-size: 0.9em;
+}
+
+.sourcesCard {
+  margin-top: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.16);
+  padding: 10px;
+}
+
+.sourcesCard__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.sourcesCard__title {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.sourcesCard__tools {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sourcesCard__btn {
+  padding: 7px 10px;
+  border-radius: 10px;
+}
+
+.sourcesCard__list {
+  display: grid;
+  gap: 8px;
+}
+
+.sourceItem {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+
+.sourceItem__summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 10px 10px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.sourceItem__summary::-webkit-details-marker {
+  display: none;
+}
+
+.sourceItem__loc {
+  font-family: var(--mono);
+  font-size: 0.92rem;
+  color: var(--text);
+}
+
+.sourceItem__preview {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sourceItem__body {
+  padding: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  display: grid;
+  gap: 8px;
+}
+
+.sourceItem__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sourceItem__excerpt {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.22);
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.45;
+  color: var(--muted);
 }
 
 .sources-list {

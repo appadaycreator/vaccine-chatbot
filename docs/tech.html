@@ -8,6 +8,7 @@
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
   </head>
   <body>
+    <a class="skip-link" href="#main">本文へ移動</a>
     <header class="header">
       <div class="header__title">
         <h1>利用技術・システム構成</h1>
@@ -19,7 +20,7 @@
       </div>
     </header>
 
-    <main class="main">
+    <main class="main" id="main">
       <section class="card">
         <h2>全体像</h2>
         <p class="muted">
@@ -44,14 +45,14 @@
       </section>
 
       <section class="card">
-        <h2>LLM / Embedding（ローカル推論）</h2>
+        <h2>LLM / 埋め込み（ローカル推論）</h2>
         <ul class="muted">
-          <li><code>Ollama</code>: ローカルLLM実行基盤（生成と embedding の両方）</li>
+          <li><code>Ollama</code>: ローカルLLM実行基盤（文章生成と埋め込みの両方）</li>
           <li><strong>生成モデル（例）</strong>: <code>gemma2:2b</code>, <code>gemma2</code>, <code>llama3.1</code></li>
-          <li><strong>Embeddingモデル</strong>: <code>nomic-embed-text</code></li>
+          <li><strong>埋め込みモデル</strong>: <code>nomic-embed-text</code></li>
         </ul>
         <p class="muted small">
-          初回の遅さ対策として、API起動時に embedding を軽くウォームアップします（失敗しても API は落としません）。
+          初回の遅さ対策として、API起動時に埋め込み処理を軽くウォームアップします（失敗しても API は落としません）。
         </p>
       </section>
 
@@ -64,7 +65,7 @@
           <li><code>ChromaDB</code>: ベクトルDB（永続化ディレクトリ: 既定 <code>./chroma_db</code>）</li>
         </ul>
         <p class="muted small">
-          PDFは <code>./pdfs</code>（環境変数 <code>PDF_DIR</code>）に配置します。追加/更新後は <code>POST /reload</code> で再インデックスできます。
+          PDFは <code>./pdfs</code>（環境変数 <code>PDF_DIR</code>）に配置します。追加/更新後は <code>POST /reload</code> で索引（検索の準備）を作り直して反映できます。
           スキャンPDFでテキスト抽出できない場合は「要OCR」として案内されます。
         </p>
       </section>
@@ -73,8 +74,8 @@
         <h2>フロントエンド（GitHub Pages）</h2>
         <ul class="muted">
           <li><code>docs/index.html</code> + <code>docs/app.js</code> + <code>docs/style.css</code>: 静的チャットUI</li>
-          <li>ブラウザから <code>POST /chat</code> を呼び出し、根拠（参照ページ）や timings を表示</li>
-          <li>API Base URL は <code>localStorage</code> または <code>?api=...</code> で指定</li>
+          <li>ブラウザから <code>POST /chat</code> を呼び出し、根拠（参照ページ）や処理時間（内訳）を表示</li>
+          <li>APIのURLは <code>localStorage</code> または <code>?api=...</code> で指定</li>
           <li>送信中の多重実行防止、再送、入力履歴、Markdown表示、エラー要点＋詳細ログ（折りたたみ）を実装</li>
         </ul>
       </section>
@@ -82,11 +83,11 @@
       <section class="card">
         <h2>公開/運用（例）</h2>
         <ul class="muted">
-          <li><code>cloudflared</code>: ローカルAPIを HTTPS で公開（GitHub Pages から Mixed Content にならないようにする）</li>
+          <li><code>cloudflared</code>: ローカルAPIを HTTPS で公開（GitHub Pages から混在コンテンツにならないようにする）</li>
           <li><code>launchd</code>（macOS）: uvicorn をログイン/再起動後に自動起動（テンプレ: <code>launchd/com.vaccine.api.plist</code>）</li>
         </ul>
         <p class="muted small">
-          Quick Tunnel はURLが変わるため、常時稼働は named tunnel が推奨です（README参照）。
+          クイックトンネル（Quick Tunnel）はURLが変わるため、常時稼働は固定トンネル（named tunnel）が推奨です（README参照）。
         </p>
       </section>
 
