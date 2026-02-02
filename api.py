@@ -274,8 +274,13 @@ def _normalize_answer_text(answer: str, *, fallback_used: bool) -> str:
         lines.append(line)
     text2 = "\n".join(lines).strip()
 
-    # 旧セクション見出しを“会話文”として読めるように除去
+    # 旧セクション見出しを“会話文”として読めるように除去（行頭/単独行の両方に対応）
+    text2 = re.sub(r"^\s*(結論|根拠|相談先)\s*[:：]\s*$", "", text2, flags=re.MULTILINE)
     text2 = re.sub(r"^\s*(結論|根拠|相談先)\s*[:：]\s*", "", text2, flags=re.MULTILINE)
+
+    # 旧フォールバック由来の見出し（参考情報）を除去（混入しても見せない）
+    text2 = re.sub(r"^\s*【参考情報】\s*$", "", text2, flags=re.MULTILINE)
+    text2 = re.sub(r"^\s*【資料】\s*$", "", text2, flags=re.MULTILINE)
 
     # モデルが一般論で埋めるのを抑止（「一般的には…」は要らない）
     # - 1文/1行でも混ざるとノイズになるため、文単位・行単位で落とす
@@ -293,8 +298,9 @@ def _normalize_answer_text(answer: str, *, fallback_used: bool) -> str:
 
 def _no_sources_answer(question: str) -> str:
     q = (question or "").strip()
+    # 「資料にない」を短く返し、余計な説明（一般論）をしない
     qline = f"（質問: {q}）" if q else ""
-    return f"資料に記載がないため、この資料に基づく回答はできません。{qline}".strip()
+    return f"参照PDFから該当箇所を特定できなかったため、この資料に基づく回答はできません。{qline}".strip()
 
 
 def _build_answer_prompt(*, question: str, context: str) -> str:
