@@ -10,6 +10,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from collections import Counter, deque
 from datetime import datetime, timezone
@@ -45,7 +47,7 @@ DEFAULT_EMBEDDING_TIMEOUT_S = 180
 DEFAULT_SEARCH_TIMEOUT_S = 60
 DEFAULT_GENERATE_TIMEOUT_S = 180
 DEFAULT_CACHE_MAX_ENTRIES = 512
-DEFAULT_INDEX_CHECK_TIMEOUT_S = 120
+DEFAULT_INDEX_CHECK_TIMEOUT_S = 60
 
 REQUEST_ID_HEADER = "X-Request-ID"
 _request_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("request_id", default=None)
@@ -1996,7 +1998,14 @@ async def _embed_query_with_cache(prompt: str, timeout_s: int) -> tuple[list[flo
     raise last_err
 
 
-async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_timeout_s: int) -> dict[str, Any]:
+async def _run_search(
+    prompt: str,
+    k: int,
+    embedding_timeout_s: int,
+    search_timeout_s: int,
+    *,
+    overall_timeout_s: int | None = None,
+) -> dict[str, Any]:
     timings: dict[str, Any] = {}
     t_total0 = time.perf_counter()
 
@@ -2013,6 +2022,10 @@ async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_time
         )
 
     index_check_timeout_s = int(os.environ.get("INDEX_CHECK_TIMEOUT_S", str(DEFAULT_INDEX_CHECK_TIMEOUT_S)))
+    # Cloudflare tunnel 等の「フロント→API」では、オリジン応答が遅いと 524 になり CORS に見える。
+    # それを避けるため、index_check の上限をリクエスト全体の timeout_s 以内に収める。
+    if isinstance(overall_timeout_s, int) and overall_timeout_s > 0:
+        index_check_timeout_s = max(5, min(index_check_timeout_s, overall_timeout_s))
     t_index0 = time.perf_counter()
     async with lock:
         try:
@@ -2292,7 +2305,7 @@ async def _run_generate_general_fallback(prompt: str, model: str, max_tokens: in
 @app.post("/search")
 async def search_endpoint(payload: SearchRequest, request: Request):
     et, st, _ = _resolve_timeouts(payload.timeout_s, payload.embedding_timeout_s, payload.search_timeout_s, None)
-    result = await _run_search(payload.prompt, payload.k, embedding_timeout_s=et, search_timeout_s=st)
+    result = await _run_search(payload.prompt, payload.k, embedding_timeout_s=et, search_timeout_s=st, overall_timeout_s=payload.timeout_s)
     docs = result["docs"]
     timings = result["timings"]
     app.state.last_request_timings = {"stage": "search", **timings}
@@ -2355,7 +2368,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         payload.generate_timeout_s,
     )
 
-    search_res = await _run_search(payload.prompt, payload.k, embedding_timeout_s=et, search_timeout_s=st)
+    search_res = await _run_search(payload.prompt, payload.k, embedding_timeout_s=et, search_timeout_s=st, overall_timeout_s=payload.timeout_s)
     docs = search_res["docs"]
     context = search_res["context"]
     timings = dict(search_res["timings"])
@@ -2501,6 +2514,42 @@ def _has_model(model_names: list[str], wanted: str) -> bool:
     return any(n == w or n.startswith(w + ":") for n in model_names)
 
 
+def _resolve_ollama_host() -> str:
+    """
+    Ollama の接続先を正規化して返す。
+    - 既定: http://127.0.0.1:11434
+    - OLLAMA_HOST がスキーム無しの場合は http:// を補う
+    """
+    raw = (os.environ.get("OLLAMA_HOST") or "").strip()
+    if not raw:
+        raw = "http://127.0.0.1:11434"
+    if not re.match(r"^https?://", raw):
+        raw = "http://" + raw
+    return raw.rstrip("/")
+
+
+def _ollama_http_ping(ollama_host: str, *, timeout_s: float) -> dict[str, Any] | None:
+    """
+    /api/version を叩いて疎通確認する（モデル一覧より軽い）。
+    成功したら JSON(dict) を返す。失敗したら None。
+    """
+    host = (ollama_host or "").strip().rstrip("/")
+    if not host:
+        return None
+    url = urllib.parse.urljoin(host + "/", "api/version")
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
+        body = resp.read().decode("utf-8", errors="ignore").strip()
+    if not body:
+        return {}
+    try:
+        data = json.loads(body)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        # JSONでなくても疎通はできているので空dictを返す
+        return {}
+
+
 @app.get("/diagnostics")
 async def diagnostics(model: str | None = None) -> dict[str, Any]:
     """
@@ -2521,16 +2570,28 @@ async def diagnostics(model: str | None = None) -> dict[str, Any]:
         checks.append(item)
 
     # タイムアウトは短め（UIが固まらないように）
-    list_timeout_s = float(os.environ.get("DIAG_LIST_TIMEOUT_S", "3.0"))
-    embed_timeout_s = float(os.environ.get("DIAG_EMBED_TIMEOUT_S", "6.0"))
+    # - ただし 3秒は「初回起動/高負荷」で誤判定（タイムアウト）になりやすいので、既定は少し緩める
+    ping_timeout_s = float(os.environ.get("DIAG_PING_TIMEOUT_S", "1.2"))
+    list_timeout_s = float(os.environ.get("DIAG_LIST_TIMEOUT_S", "8.0"))
+    embed_timeout_s = float(os.environ.get("DIAG_EMBED_TIMEOUT_S", "8.0"))
 
     model_names: list[str] = []
     ollama_ok = False
+    list_ok = False
+    ollama_host = _resolve_ollama_host()
+    ollama_version: str | None = None
     try:
-        info = await asyncio.wait_for(asyncio.to_thread(ollama.list), timeout=list_timeout_s)
-        model_names = _model_names_from_ollama_list(info)
+        # まず軽い疎通（/api/version）で「到達できるか」を判定する
+        ping = await asyncio.wait_for(
+            asyncio.to_thread(_ollama_http_ping, ollama_host, timeout_s=min(ping_timeout_s, max(0.5, list_timeout_s))),
+            timeout=min(max(0.5, ping_timeout_s), max(0.5, list_timeout_s)),
+        )
+        if isinstance(ping, dict):
+            v = ping.get("version")
+            if isinstance(v, str) and v.strip():
+                ollama_version = v.strip()
         ollama_ok = True
-        add_check("green", "Ollama疎通", "Ollama に接続できました。")
+        add_check("green", "Ollama疎通", f"Ollama に接続できました。{f'（version: {ollama_version}）' if ollama_version else ''}")
     except TimeoutError:
         add_check(
             "red",
@@ -2539,6 +2600,7 @@ async def diagnostics(model: str | None = None) -> dict[str, Any]:
             hints=[
                 "Ollama が起動しているか確認してください（例: brew services start ollama）",
                 "サーバー負荷が高い場合は時間をおいて再試行してください",
+                "環境変数 OLLAMA_HOST を変更している場合は値を確認してください",
             ],
         )
     except Exception as e:
@@ -2553,53 +2615,98 @@ async def diagnostics(model: str | None = None) -> dict[str, Any]:
         )
 
     if ollama_ok:
-        if _has_model(model_names, requested_model):
-            add_check("green", "回答モデル", f"回答モデル（{requested_model}）が見つかりました。")
-        else:
-            add_check(
-                "red",
-                "回答モデル",
-                f"回答モデル（{requested_model}）が見つかりません。",
-                hints=[f"ollama pull {requested_model}", "UIのモデル選択を、インストール済みモデルに変更してください"],
-            )
-
-        if _has_model(model_names, embed_model):
-            add_check("green", "Embeddingモデル", f"Embeddingモデル（{embed_model}）が見つかりました。")
-        else:
-            add_check(
-                "red",
-                "Embeddingモデル",
-                f"Embeddingモデル（{embed_model}）が見つかりません。",
-                hints=[f"ollama pull {embed_model}", "RAG（PDF検索）は embedding モデルが無いと動きません"],
-            )
-
-        # embedding の簡易チェック（存在しないと確実に失敗するので、存在確認が通った場合だけ実施）
-        if _has_model(model_names, embed_model):
+        # 次にモデル一覧（重いことがある）。失敗しても「到達不可」とは区別して表示する。
+        try:
+            retries = int(os.environ.get("DIAG_LIST_RETRIES", "1"))
+        except Exception:
+            retries = 1
+        last_list_err: Exception | None = None
+        for attempt in range(max(0, retries) + 1):
             try:
-                embeddings = getattr(app.state, "embeddings", None) or OllamaEmbeddings(model=embed_model)
-                vec = await asyncio.wait_for(asyncio.to_thread(embeddings.embed_query, "diag"), timeout=embed_timeout_s)
-                ok = isinstance(vec, list) and len(vec) > 0
-                add_check("green" if ok else "yellow", "Embedding動作", "Embedding のスモークテストが完了しました。" if ok else "Embedding の結果が不正です。")
-            except TimeoutError:
-                add_check(
-                    "yellow",
-                    "Embedding動作",
-                    "Embedding のスモークテストがタイムアウトしました（初回起動や高負荷の可能性）。",
-                    hints=[
-                        "初回はモデル起動で時間がかかる場合があります。少し待って再試行してください",
-                        "必要なら DIAG_EMBED_TIMEOUT_S を延長してください",
-                    ],
-                )
+                info = await asyncio.wait_for(asyncio.to_thread(ollama.list), timeout=list_timeout_s)
+                model_names = _model_names_from_ollama_list(info)
+                list_ok = True
+                break
+            except TimeoutError as e:
+                last_list_err = e
             except Exception as e:
+                last_list_err = e
+                break
+            if attempt < max(0, retries):
+                await asyncio.sleep(0.2 * (2**attempt))
+
+        if not list_ok:
+            msg = (
+                "モデル一覧の取得がタイムアウトしました。"
+                if isinstance(last_list_err, TimeoutError)
+                else f"モデル一覧の取得に失敗しました: {last_list_err}"
+            )
+            add_check(
+                "yellow",
+                "モデル一覧",
+                msg,
+                hints=[
+                    "Ollama 自体は応答していますが、モデル一覧が遅い/失敗しています（初回起動・高負荷の可能性）",
+                    "少し待ってから再試行してください",
+                    "必要なら DIAG_LIST_TIMEOUT_S を延長してください",
+                ],
+            )
+
+        if not list_ok:
+            add_check("yellow", "回答モデル", "未確認（モデル一覧を取得できないため）。", hints=["モデル一覧が取得できる状態で再試行してください"])
+            add_check("yellow", "Embeddingモデル", "未確認（モデル一覧を取得できないため）。", hints=["モデル一覧が取得できる状態で再試行してください"])
+        else:
+            if _has_model(model_names, requested_model):
+                add_check("green", "回答モデル", f"回答モデル（{requested_model}）が見つかりました。")
+            else:
                 add_check(
                     "red",
-                    "Embedding動作",
-                    f"Embedding のスモークテストに失敗しました: {e}",
-                    hints=[
-                        "Ollama が起動しているか確認してください",
-                        f"ollama pull {embed_model} を実行してください",
-                    ],
+                    "回答モデル",
+                    f"回答モデル（{requested_model}）が見つかりません。",
+                    hints=[f"ollama pull {requested_model}", "UIのモデル選択を、インストール済みモデルに変更してください"],
                 )
+
+            if _has_model(model_names, embed_model):
+                add_check("green", "Embeddingモデル", f"Embeddingモデル（{embed_model}）が見つかりました。")
+            else:
+                add_check(
+                    "red",
+                    "Embeddingモデル",
+                    f"Embeddingモデル（{embed_model}）が見つかりません。",
+                    hints=[f"ollama pull {embed_model}", "RAG（PDF検索）は embedding モデルが無いと動きません"],
+                )
+
+            # embedding の簡易チェック（存在しないと確実に失敗するので、存在確認が通った場合だけ実施）
+            if _has_model(model_names, embed_model):
+                try:
+                    embeddings = getattr(app.state, "embeddings", None) or OllamaEmbeddings(model=embed_model)
+                    vec = await asyncio.wait_for(asyncio.to_thread(embeddings.embed_query, "diag"), timeout=embed_timeout_s)
+                    ok = isinstance(vec, list) and len(vec) > 0
+                    add_check(
+                        "green" if ok else "yellow",
+                        "Embedding動作",
+                        "Embedding のスモークテストが完了しました。" if ok else "Embedding の結果が不正です。",
+                    )
+                except TimeoutError:
+                    add_check(
+                        "yellow",
+                        "Embedding動作",
+                        "Embedding のスモークテストがタイムアウトしました（初回起動や高負荷の可能性）。",
+                        hints=[
+                            "初回はモデル起動で時間がかかる場合があります。少し待って再試行してください",
+                            "必要なら DIAG_EMBED_TIMEOUT_S を延長してください",
+                        ],
+                    )
+                except Exception as e:
+                    add_check(
+                        "red",
+                        "Embedding動作",
+                        f"Embedding のスモークテストに失敗しました: {e}",
+                        hints=[
+                            "Ollama が起動しているか確認してください",
+                            f"ollama pull {embed_model} を実行してください",
+                        ],
+                    )
 
     overall_level = _max_level([str(c.get("level") or "green") for c in checks] or ["yellow"])
     summary = {"green": "OK", "yellow": "一部注意", "red": "要対応"}.get(overall_level, "未確認")
@@ -2612,6 +2719,8 @@ async def diagnostics(model: str | None = None) -> dict[str, Any]:
         "meta": {
             "requested_model": requested_model,
             "embed_model": embed_model,
+            "ollama_host": ollama_host,
+            "ollama_version": ollama_version,
             "run_mode": getattr(app.state, "run_mode", None),
             "version": getattr(app.state, "version", None),
             "git_sha": getattr(app.state, "git_sha", None),

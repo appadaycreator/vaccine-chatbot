@@ -570,9 +570,11 @@ async function postSearch({ apiBase, prompt, k, signal }) {
     {
       prompt,
       k,
-      timeout_s: 180,
-      embedding_timeout_s: 240,
-      search_timeout_s: 120,
+      // Cloudflare tunnel 経由だと、応答が遅いと 524 になり CORS に見えるため、
+      // クライアント側で上限を短めにして、APIが先に JSON（504等）を返せるようにする。
+      timeout_s: 90,
+      embedding_timeout_s: 20,
+      search_timeout_s: 20,
     },
     { signal }
   );
@@ -587,8 +589,8 @@ async function postGenerate({ apiBase, prompt, model, context, signal }) {
       model,
       context,
       max_tokens: 120,
-      timeout_s: 240,
-      generate_timeout_s: 240,
+      timeout_s: 90,
+      generate_timeout_s: 45,
     },
     { signal }
   );
@@ -603,10 +605,10 @@ async function postChat({ apiBase, prompt, model, k, signal }) {
       model,
       k,
       max_tokens: 120,
-      timeout_s: 240,
-      embedding_timeout_s: 240,
-      search_timeout_s: 120,
-      generate_timeout_s: 240,
+      timeout_s: 90,
+      embedding_timeout_s: 20,
+      search_timeout_s: 20,
+      generate_timeout_s: 45,
     },
     { signal }
   );
@@ -1286,12 +1288,21 @@ function main() {
       diagErrorEl.textContent = "";
 
       const checks = Array.isArray(data.checks) ? data.checks : [];
+      const metaOllamaHost = data && data.meta && data.meta.ollama_host ? String(data.meta.ollama_host) : "";
+      const metaOllamaVersion = data && data.meta && data.meta.ollama_version ? String(data.meta.ollama_version) : "";
       diagListEl.innerHTML = checks
         .map((c) => {
           const lv = normalizeLevel(c && c.level);
           const label = c && c.label ? String(c.label) : "チェック";
           const msg = c && c.message ? String(c.message) : "";
           const hints = Array.isArray(c && c.hints) ? c.hints.map((x) => String(x)) : [];
+          // 疎通不良の切り分けに重要なので、接続先を補足表示する
+          if ((label === "Ollama疎通" || label === "モデル一覧") && metaOllamaHost) {
+            hints.push(`接続先（OLLAMA_HOST）: ${metaOllamaHost}`);
+          }
+          if (label === "Ollama疎通" && metaOllamaVersion) {
+            hints.push(`Ollama version: ${metaOllamaVersion}`);
+          }
           const hintsText = hints.length ? "対処:\n- " + hints.join("\n- ") : "";
           return `
             <li class="diag-item">
