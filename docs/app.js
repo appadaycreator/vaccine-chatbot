@@ -1831,31 +1831,6 @@ function main() {
     }
   });
 
-  // 例: よくある質問（ボタン）
-  const quick = $("quickQuestions");
-  const quickItems = [
-    "接種後に観察・記録すべき項目は？（資料にある範囲で）",
-    "接種後に起こりうる反応（発熱・痛み等）について、資料ではどう説明されていますか？",
-    "受診や相談が必要になる目安は？（資料にある範囲で）",
-    "相談先（医療機関・自治体の相談窓口など）はどこですか？（資料にある範囲で）",
-  ];
-  quick.innerHTML = quickItems
-    .map((t) => `<button type="button" class="btn btn--secondary" data-q="${escapeHtml(t)}">例: ${escapeHtml(t)}</button>`)
-    .join("");
-  quick.addEventListener("click", (e) => {
-    const btn = e.target && e.target.closest ? e.target.closest("button[data-q]") : null;
-    if (!btn) return;
-    const q = btn.getAttribute("data-q") || "";
-    // data属性はHTMLエスケープ済みなので復元せずそのまま（記号類も表示上は問題ない想定）
-    // 実際に送る値としては textContent の方が安全
-    const text = btn.textContent ? btn.textContent.replace(/^例:\s*/, "") : q;
-    promptEl.value = text;
-    promptEl.focus();
-    if (!busy && !guard.blocked) {
-      $("chatForm").requestSubmit();
-    }
-  });
-
   addMessage(
     "assistant",
     sameOriginUi

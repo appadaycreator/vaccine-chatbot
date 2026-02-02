@@ -37,7 +37,7 @@ with st.sidebar:
     st.caption("埋め込みモデル: `nomic-embed-text`（固定 / 未導入なら `ollama pull nomic-embed-text`）")
     st.caption("PDFはサーバー側で `./pdfs/`（環境変数 `PDF_DIR`）に配置して利用します。")
     st.divider()
-    st.caption("操作ヒント: 「例」ボタンで質問を自動送信 / 「再送」で最後の質問をもう一度送れます。")
+    st.caption("操作ヒント: 「再送」で最後の質問をもう一度送れます。")
 
 
 def _no_sources_answer(question: str) -> str:
@@ -511,25 +511,11 @@ components.html(
     height=70,
 )
 
-# 横展開（UX最低限）: 例ボタン / 再送
+# 横展開（UX最低限）: 再送
 if "queued_prompt" not in st.session_state:
     st.session_state.queued_prompt = ""
 if "last_user_prompt" not in st.session_state:
     st.session_state.last_user_prompt = ""
-
-quick_items = [
-    "接種後に観察・記録すべき項目は？（資料にある範囲で）",
-    "接種後に起こりうる反応（発熱・痛み等）について、資料ではどう説明されていますか？",
-    "受診や相談が必要になる目安は？（資料にある範囲で）",
-    "相談先（医療機関・自治体の相談窓口など）はどこですか？（資料にある範囲で）",
-]
-
-qcols = st.columns([1, 1, 1, 1])
-for i, text in enumerate(quick_items):
-    with qcols[i]:
-        if st.button(f"例: {text}", use_container_width=True):
-            st.session_state.queued_prompt = text
-            st.rerun()
 
 rs_col1, rs_col2 = st.columns([1, 3])
 with rs_col1:

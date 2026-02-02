@@ -146,10 +146,9 @@ def _record_error(item: dict[str, Any]) -> None:
 def _new_request_id() -> str:
     return uuid.uuid4().hex
 
-# 回答品質（医療系の言い方）を最低ラインで保証するための固定フォーマット
+# 回答品質（医療系の言い方）を最低ラインで保証するための挙動
 # - 断定・誤誘導を避けるため、根拠（sources）が取れない場合は必ず「資料にない」を返す
-# - 回答の構造を固定し、余計なセクションを出さない
-ANSWER_SECTIONS = ("結論", "根拠")
+# - 回答本文は“普通の会話文”として返し、見出し（結論/根拠 等）を強制しない
 
 _JP_TERM_RE = re.compile(r"[一-龥ぁ-んァ-ン]{2,}|[A-Za-z0-9]{2,}")
 _DEFAULT_TERM_STOPWORDS = {
@@ -258,156 +257,61 @@ def _filter_docs_by_keyword_overlap(prompt: str, docs: list[Any]) -> tuple[list[
 
 def _normalize_answer_text(answer: str, *, fallback_used: bool) -> str:
     """
-    LLM出力の体裁を整える（UIがMarkdown表示でも見出しが暴れないようにする）。
-    - `## 結論:` のようなMarkdown見出しを除去し、`結論:` 等に統一
-    - フォールバック時はページラベル（[P12]）等を削除
+    LLM出力の体裁を整える（UIがMarkdown表示でも崩れにくくする）。
+    - Markdown見出し（# など）を除去
+    - 旧フォーマットの「結論:」「根拠:」「相談先:」等が混ざっても“会話文”として読めるように取り除く
+    - （互換）fallback_used の場合はページラベル等を除去
     """
     text = _normalize_newlines(answer).strip()
     if not text:
         return text
 
-    # まずは見出しの "##" 等を除去して正規化
-    norm_lines: list[str] = []
+    # Markdown見出し記号を除去（"## ..." -> "..."）
+    lines: list[str] = []
     for raw in text.split("\n"):
         line = raw.rstrip()
-        m = re.match(r"^\s*#{1,6}\s*(結論|根拠)\s*[:：]?\s*(.*)$", line)
-        if m:
-            head = m.group(1)
-            rest = (m.group(2) or "").strip()
-            norm_lines.append(f"{head}:" + (f" {rest}" if rest else ""))
-            continue
-        line = re.sub(r"^\s*#{2,6}\s+", "", line)
-        norm_lines.append(line)
+        line = re.sub(r"^\s*#{1,6}\s+", "", line)
+        lines.append(line)
+    text2 = "\n".join(lines).strip()
 
-    text2 = "\n".join(norm_lines).strip()
-    for sec in ANSWER_SECTIONS:
-        text2 = re.sub(rf"^\s*{sec}\s*[:：]?\s*$", f"{sec}:", text2, flags=re.MULTILINE)
+    # 旧セクション見出しを“会話文”として読めるように除去
+    text2 = re.sub(r"^\s*(結論|根拠|相談先)\s*[:：]\s*", "", text2, flags=re.MULTILINE)
 
     if fallback_used:
         text2 = re.sub(r"\[P\d+\]", "", text2)
         text2 = text2.replace("【資料】", "【参考情報】")
 
-    # セクションを抽出して、必ず3セクション構造に組み直す
-    sec_re = re.compile(r"^(結論|根拠):\s*(.*)$")
-    order = list(ANSWER_SECTIONS)
-    buckets: dict[str, list[str]] = {k: [] for k in order}
-    current: str | None = None
-    for raw in _normalize_newlines(text2).split("\n"):
-        line = raw.rstrip()
-        m = sec_re.match(line.strip())
-        if m:
-            current = m.group(1)
-            rest = (m.group(2) or "").strip()
-            if rest:
-                buckets[current].append(rest)
-            continue
-        if current:
-            buckets[current].append(line)
-
-    def _clean_block(lines: list[str]) -> str:
-        # 連続空行を潰しつつ整形
-        out: list[str] = []
-        last_blank = True
-        for ln in [x.rstrip() for x in (lines or [])]:
-            if not ln.strip():
-                if not last_blank:
-                    out.append("")
-                last_blank = True
-                continue
-            out.append(ln)
-            last_blank = False
-        return "\n".join(out).strip()
-
-    conclusion = _clean_block(buckets.get("結論", []))
-    rationale = _clean_block(buckets.get("根拠", []))
-
-    # 根拠が空なら最低限の文言を入れる（空出力防止）
-    if not rationale:
-        rationale = "- （資料の該当箇所を特定できませんでした）" if not fallback_used else "- （参考情報と一般的な注意に基づきます）"
-
-    # 結論が空なら、元文面をそのまま結論に入れておく（空出力防止）
-    if not conclusion:
-        conclusion = "（回答を生成できませんでした）"
-
-    out = f"結論:\n{conclusion}\n\n根拠:\n{rationale}\n"
-    # 余計な二重スペースなどを軽く掃除
-    out = re.sub(r"[ \t]+\n", "\n", out)
-    out = re.sub(r"\n{3,}", "\n\n", out).strip()
-    return out
+    text2 = re.sub(r"[ \t]+\n", "\n", text2)
+    text2 = re.sub(r"\n{3,}", "\n\n", text2).strip()
+    return text2
 
 
 def _no_sources_answer(question: str) -> str:
     q = (question or "").strip()
     qline = f"（質問: {q}）" if q else ""
-    return (
-        "結論:\n"
-        "資料に記載がないため、この資料に基づく回答はできません。"
-        f"{qline}\n\n"
-        "根拠:\n"
-        "- 資料にない（参照PDFから該当箇所を特定できませんでした）\n"
-    )
+    return f"資料に記載がないため、この資料に基づく回答はできません。{qline}".strip()
 
 
 def _build_answer_prompt(*, question: str, context: str) -> str:
     """
-    LLMに「結論/根拠/相談先」の構造を強制し、資料外の推測を抑止するテンプレ。
+    LLMに「資料にある範囲だけで答える」ことを強制し、資料外の推測を抑止するテンプレ。
     注意: sources が空のときは呼び出し側で生成せず _no_sources_answer を返す（DoD対策）。
     """
     return f"""
 あなたは医療情報の文脈で、厚労省等の配布資料（下の【資料】）に基づいて回答するアシスタントです。
 推測や一般論で補完してはいけません。【資料】に書かれていないことは「資料にない」と明確に述べてください。
 
-必ず次の2セクションだけで出力してください（見出し名は固定、Markdownの # や ## は使わない）:
-結論:
-根拠:
+出力ルール:
+- 回答本文は、日本語で自然な会話文として簡潔に答える（固定フォーマット/見出しは出さない）
+- ページ番号や `[P12]` などのラベル、引用記号は回答本文に出さない（根拠表示はUI側で行う）
+- 【資料】の内容を超える一般論・注意喚起・追加の助言は書かない（資料にある範囲のみ）
 
 ルール:
 - 【資料】に書かれていない内容を断定しない（曖昧にそれっぽく言わない）
-- 「根拠」には、【資料】から該当箇所をページラベル（例: [P3]）つきで引用/要約して箇条書きで示す
-- 余計な免責文や追加セクション（注意/補足など）は出さない（UI側で常設するため）
-- 見出しは必ず `結論:` / `根拠:` のプレーンテキストのみ（Markdown見出しにしない）
+- 資料に書かれている場合でも、医療判断（診断/治療の指示）として断定しない
 
 【資料】:
 {context}
-
-質問: {question}
-""".strip()
-
-
-# 根拠（PDFの該当箇所）が取れない場合のフォールバック用「参考情報」。
-# - 注意: 参照PDFに基づく“根拠”ではない。UIで根拠（引用）カードは出ない想定。
-# - それでも「まったく回答が返らない/常に資料にない」状態を避けるための“安全側の一般説明”。
-FALLBACK_KNOWLEDGE_BASE = """
-【プロトタイプ知識ベース（資料外・一般情報）】
-- 接種後は体調変化（発熱、痛み、倦怠感など）が起こり得ます
-- 症状が強い／長引く／急に悪化する場合は、接種を受けた医療機関またはお住まいの自治体の相談窓口に相談してください
-- 呼吸が苦しい、意識がもうろう、急激な悪化など緊急性が疑われる場合は 119（救急）を利用してください
-""".strip()
-
-
-def _build_general_fallback_prompt(*, question: str, reference: str) -> str:
-    """
-    参照PDFから該当箇所が取れなかったときの一般説明用プロンプト。
-    - 参照PDFに基づくと“断定しない”
-    """
-    return f"""
-あなたは医療情報の文脈で回答するアシスタントです。
-現在、参照PDFから質問の該当箇所を特定できていません。
-そのため、以下の【参考情報】と一般的な注意として、断定を避けつつ回答してください。
-
-必ず次の2セクションだけで出力してください（見出し名は固定、Markdownの # や ## は使わない）:
-結論:
-根拠:
-
-ルール:
-- 参照PDFに基づくと断定しない（ページラベルの引用もしない）
-- ページ番号や `[P12]` のような表記は一切出力しない
-- 見出しは必ず `結論:` / `根拠:` のプレーンテキストのみ
-- 「根拠」には、【参考情報】からの引用/要約と、「一般的には…」のような前置きを使って不確実性を明示する
-- 余計な追加セクション（注意/補足など）は出さない
-
-【参考情報】:
-{reference}
 
 質問: {question}
 """.strip()
@@ -568,8 +472,7 @@ class ChatRequest(BaseModel):
     embedding_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
     search_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
     generate_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
-    # 根拠（PDF該当箇所）が取れない場合でも一般説明を返す（横展開: docs UI / Streamlit）
-    # - 未指定（None）の場合は環境変数 ALLOW_GENERAL_FALLBACK_DEFAULT を参照
+    # 互換: 旧クライアント向け（現在は無効化し、常に資料ベースのみで回答する）
     allow_general_fallback: Optional[bool] = Field(default=None)
 
 
@@ -588,6 +491,7 @@ class GenerateRequest(BaseModel):
     timeout_s: int = Field(default=180, ge=5, le=900)  # 互換（まとめて指定）
     generate_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
     context: str = Field(default="", max_length=MAX_CONTEXT_CHARS + 500)
+    # 互換: 旧クライアント向け（現在は無効化し、常に資料ベースのみで回答する）
     allow_general_fallback: Optional[bool] = Field(default=None)
 
 
@@ -2248,60 +2152,6 @@ async def _run_generate(prompt: str, context: str, model: str, max_tokens: int, 
     return {"answer": ans, "timings": {"generate_ms": int((time.perf_counter() - t0) * 1000)}}
 
 
-def _env_allow_general_fallback_default() -> bool:
-    # 既定はON（「何も返らない/資料にないだけ」状態を避ける）。必要なら環境変数でOFFにできる。
-    v = (os.environ.get("ALLOW_GENERAL_FALLBACK_DEFAULT", "1") or "1").strip().lower()
-    return v in ("1", "true", "yes", "y", "on")
-
-
-async def _run_generate_general_fallback(prompt: str, model: str, max_tokens: int, generate_timeout_s: int) -> dict[str, Any]:
-    t0 = time.perf_counter()
-    full_prompt = _build_general_fallback_prompt(question=prompt, reference=FALLBACK_KNOWLEDGE_BASE)
-    try:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                ollama.generate,
-                model=model,
-                prompt=full_prompt,
-                options={"num_predict": max_tokens},
-            ),
-            timeout=generate_timeout_s,
-        )
-    except TimeoutError:
-        _http_error(
-            stage="generate",
-            code="GENERATE_TIMEOUT",
-            message="生成（LLM応答）がタイムアウトしました",
-            timeout_s=generate_timeout_s,
-            hints=[
-                "初回はモデル起動で時間がかかります。しばらく待つか、タイムアウトを延長してください",
-                "軽量モデル（例: gemma2:2b）を選んでください",
-            ],
-            timings={"generate_ms": int((time.perf_counter() - t0) * 1000)},
-            status_code=504,
-        )
-    except Exception as e:
-        if _is_ollama_down_error(e):
-            _http_error(
-                stage="generate",
-                code="OLLAMA_UNAVAILABLE",
-                message="生成に失敗しました（Ollama に接続できない可能性）",
-                hints=["Ollama が起動しているか確認してください", f"モデルが存在するか確認してください（ollama pull {model}）"],
-                extra={"error": str(e)},
-                status_code=502,
-            )
-        _http_error(
-            stage="generate",
-            code="GENERATE_ERROR",
-            message="生成に失敗しました",
-            hints=["モデル名を確認してください", "Ollama のログを確認してください"],
-            extra={"error": str(e)},
-            status_code=500,
-        )
-    ans = _normalize_answer_text(response.get("response", ""), fallback_used=True)
-    return {"answer": ans, "timings": {"generate_ms": int((time.perf_counter() - t0) * 1000)}}
-
-
 @app.post("/search")
 async def search_endpoint(payload: SearchRequest, request: Request):
     et, st, _ = _resolve_timeouts(payload.timeout_s, payload.embedding_timeout_s, payload.search_timeout_s, None)
@@ -2326,23 +2176,14 @@ async def search_endpoint(payload: SearchRequest, request: Request):
 @app.post("/generate")
 async def generate_endpoint(payload: GenerateRequest, request: Request):
     _, _, gt = _resolve_timeouts(payload.timeout_s, None, None, payload.generate_timeout_s)
-    allow_fallback = payload.allow_general_fallback if payload.allow_general_fallback is not None else _env_allow_general_fallback_default()
     context = (payload.context or "")[: MAX_CONTEXT_CHARS + 500]
-    if allow_fallback and not context.strip():
-        result = await _run_generate_general_fallback(
-            prompt=payload.prompt,
-            model=payload.model,
-            max_tokens=payload.max_tokens,
-            generate_timeout_s=gt,
-        )
-    else:
-        result = await _run_generate(
-            prompt=payload.prompt,
-            context=context,
-            model=payload.model,
-            max_tokens=payload.max_tokens,
-            generate_timeout_s=gt,
-        )
+    result = await _run_generate(
+        prompt=payload.prompt,
+        context=context,
+        model=payload.model,
+        max_tokens=payload.max_tokens,
+        generate_timeout_s=gt,
+    )
     timings = result["timings"]
     app.state.last_request_timings = {"stage": "generate", **timings}
     logger.info(
@@ -2374,28 +2215,12 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
     timings = dict(search_res["timings"])
     sources = _extract_sources(docs)
 
-    allow_fallback = payload.allow_general_fallback if payload.allow_general_fallback is not None else _env_allow_general_fallback_default()
-
     # sources が取れない（=根拠0件）の場合:
-    # - 既定: 生成せず「資料にない」（従来どおり）
-    # - allow_fallback: “参照PDFの根拠なし”を明示した上で、一般説明として回答を返す
+    # - 生成せず「資料にない」を返す（資料外の一般論は返さない）
     if not sources:
-        if allow_fallback:
-            gen_res = await _run_generate_general_fallback(
-                prompt=payload.prompt,
-                model=payload.model,
-                max_tokens=payload.max_tokens,
-                generate_timeout_s=gt,
-            )
-            answer = gen_res["answer"]
-            timings["generate_ms"] = gen_res["timings"]["generate_ms"]
-            timings["total_ms"] = int(
-                (timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0) + timings.get("generate_ms", 0))
-            )
-        else:
-            answer = _normalize_answer_text(_no_sources_answer(payload.prompt), fallback_used=False)
-            timings["generate_ms"] = 0
-            timings["total_ms"] = int((timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0)))
+        answer = _normalize_answer_text(_no_sources_answer(payload.prompt), fallback_used=False)
+        timings["generate_ms"] = 0
+        timings["total_ms"] = int((timings.get("index_check_ms", 0) + timings.get("embedding_ms", 0) + timings.get("search_ms", 0)))
         app.state.last_request_timings = {"stage": "chat", **timings}
         logger.info(
             "chat",
@@ -2404,7 +2229,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
                 "method": request.method,
                 "path": request.url.path,
                 "stage": "chat",
-                "extra": {"k": payload.k, "model": payload.model, "sources": 0, "fallback": bool(allow_fallback)},
+                "extra": {"k": payload.k, "model": payload.model, "sources": 0},
                 "timings": timings,
             },
         )
