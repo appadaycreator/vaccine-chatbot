@@ -29,11 +29,6 @@ with st.sidebar:
     st.header("設定")
     llm_model = st.selectbox("回答モデル", ["gemma2", "llama3.1"], index=0)
     k = st.slider("検索の強さ（k値）", min_value=1, max_value=10, value=3, step=1)
-    allow_general_fallback = st.checkbox(
-        "資料の該当箇所が見つからない場合も、一般的な説明として回答する",
-        value=True,
-        help="参照PDFの該当箇所を特定できない場合に、一般的な説明として回答します（根拠の引用は表示されないことがあります）。",
-    )
     st.caption("埋め込みモデル: `nomic-embed-text`（固定 / 未導入なら `ollama pull nomic-embed-text`）")
     st.caption("PDFはサーバー側で `./pdfs/`（環境変数 `PDF_DIR`）に配置して利用します。")
     st.divider()
@@ -43,17 +38,7 @@ with st.sidebar:
 def _no_sources_answer(question: str) -> str:
     q = (question or "").strip()
     qline = f"（質問: {q}）" if q else ""
-    return (
-        "結論:\n"
-        "資料に記載がないため、この資料に基づく回答はできません。"
-        f"{qline}\n\n"
-        "根拠:\n"
-        "- 資料にない（参照PDFから該当箇所を特定できませんでした）\n\n"
-        "相談先:\n"
-        "- 接種を受けた医療機関\n"
-        "- お住まいの自治体の予防接種相談窓口\n"
-        "- 症状が強い／急に悪化した／緊急性が疑われる場合: 119（救急）\n"
-    )
+    return f"資料に記載がないため、この資料に基づく回答はできません。{qline}".strip()
 
 
 def _build_answer_prompt(*, question: str, context: str) -> str:
@@ -61,17 +46,14 @@ def _build_answer_prompt(*, question: str, context: str) -> str:
 あなたは医療情報の文脈で、厚労省等の配布資料（下の【資料】）に基づいて回答するアシスタントです。
 推測や一般論で補完してはいけません。【資料】に書かれていないことは「資料にない」と明確に述べてください。
 
-必ず次の3セクションだけで出力してください（見出し名は固定、Markdownの # や ## は使わない）:
-結論:
-根拠:
-相談先:
+出力ルール:
+- 回答本文は、日本語で自然な会話文として簡潔に答える（固定フォーマット/見出しは出さない）
+- ページ番号や `[P12]` などのラベル、引用記号は回答本文に出さない（根拠表示はUI側で行う）
+- 【資料】の内容を超える一般論・注意喚起・追加の助言は書かない（資料にある範囲のみ）
 
 ルール:
 - 【資料】に書かれていない内容を断定しない（曖昧にそれっぽく言わない）
-- 「根拠」には、【資料】から該当箇所を引用/要約して箇条書きで示す
-- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
-- 余計な免責文や追加セクション（注意/補足など）は出さない（UI側で常設するため）
-- 見出しは必ず `結論:` / `根拠:` / `相談先:` のプレーンテキストのみ（Markdown見出しにしない）
+- 資料に書かれている場合でも、医療判断（診断/治療の指示）として断定しない
 
 【資料】:
 {context}
@@ -80,39 +62,7 @@ def _build_answer_prompt(*, question: str, context: str) -> str:
 """.strip()
 
 
-FALLBACK_KNOWLEDGE_BASE = """
-【プロトタイプ知識ベース（資料外・一般情報）】
-- 接種後は体調変化（発熱、痛み、倦怠感など）が起こり得ます
-- 症状が強い／長引く／急に悪化する場合は、接種を受けた医療機関またはお住まいの自治体の相談窓口に相談してください
-- 呼吸が苦しい、意識がもうろう、急激な悪化など緊急性が疑われる場合は 119（救急）を利用してください
-""".strip()
-
-
-def _build_general_fallback_prompt(*, question: str, reference: str) -> str:
-    return f"""
-あなたは医療情報の文脈で回答するアシスタントです。
-現在、参照PDFから質問の該当箇所を特定できていません。
-そのため、以下の【参考情報】と一般的な注意として、断定を避けつつ回答してください。
-
-必ず次の3セクションだけで出力してください（見出し名は固定、Markdownの # や ## は使わない）:
-結論:
-根拠:
-相談先:
-
-ルール:
-- 参照PDFに基づくと断定しない（ページラベルの引用もしない）
-- ページ番号や `[P12]` のような表記は一切出力しない
-- 見出しは必ず `結論:` / `根拠:` / `相談先:` のプレーンテキストのみ
-- 「根拠」には、【参考情報】からの引用/要約と、「一般的には…」のような前置きを使って不確実性を明示する
-- 医療判断（診断/治療の指示）をしない。迷う場合は相談先へ誘導する
-- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
-- 余計な追加セクション（注意/補足など）は出さない（UI側で常設するため）
-
-【参考情報】:
-{reference}
-
-質問: {question}
-""".strip()
+## 一般論フォールバックは不要（資料ベースのみで回答する）
 
 
 def _normalize_docs_source(docs, source_label: str):
@@ -592,14 +542,9 @@ if prompt:
                 context = "\n".join([doc.page_content for doc in docs])
                 sources = _extract_sources(docs)
 
-                # 根拠が取れない場合は、生成せずに固定フォーマットで返す（断定/hallucination防止）
+                # 根拠が取れない場合は、生成せずに「資料にない」を返す（一般論は返さない）
                 if not sources:
-                    if allow_general_fallback:
-                        full_prompt = _build_general_fallback_prompt(question=prompt, reference=FALLBACK_KNOWLEDGE_BASE)
-                        response = ollama.generate(model=llm_model, prompt=full_prompt)
-                        answer = response["response"]
-                    else:
-                        answer = _no_sources_answer(prompt)
+                    answer = _no_sources_answer(prompt)
                 else:
                     full_prompt = _build_answer_prompt(question=prompt, context=context)
                     response = ollama.generate(model=llm_model, prompt=full_prompt)

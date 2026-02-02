@@ -289,57 +289,7 @@ vectorstore = build_vectorstore()
 def _no_sources_answer(question: str) -> str:
     q = (question or "").strip()
     qline = f"（質問: {q}）" if q else ""
-    return (
-        "結論:\n"
-        "資料に記載がないため、この資料に基づく回答はできません。"
-        f"{qline}\n\n"
-        "根拠:\n"
-        "- 資料にない（参照PDFから該当箇所を特定できませんでした）\n\n"
-        "相談先:\n"
-        "- 接種を受けた医療機関\n"
-        "- お住まいの自治体の予防接種相談窓口\n"
-        "- 症状が強い／急に悪化した／緊急性が疑われる場合: 119（救急）\n"
-    )
-
-FALLBACK_KNOWLEDGE_BASE = """
-【プロトタイプ知識ベース（資料外・一般情報）】
-- 接種後は体調変化（発熱、痛み、倦怠感など）が起こり得ます
-- 症状が強い／長引く／急に悪化する場合は、接種を受けた医療機関またはお住まいの自治体の相談窓口に相談してください
-- 呼吸が苦しい、意識がもうろう、急激な悪化など緊急性が疑われる場合は 119（救急）を利用してください
-""".strip()
-
-
-def _env_allow_general_fallback_default() -> bool:
-    # 既定はON（「何も返らない/資料にないだけ」状態を避ける）。必要なら環境変数でOFFにできる。
-    v = (os.environ.get("ALLOW_GENERAL_FALLBACK_DEFAULT", "1") or "1").strip().lower()
-    return v in ("1", "true", "yes", "y", "on")
-
-
-def _build_general_fallback_prompt(*, question: str, reference: str) -> str:
-    return f"""
-あなたは医療情報の文脈で回答するアシスタントです。
-現在、参照PDFから質問の該当箇所を特定できていません。
-そのため、以下の【参考情報】と一般的な注意として、断定を避けつつ回答してください。
-
-必ず次の3セクションだけで出力してください（見出し名は固定、Markdownの # や ## は使わない）:
-結論:
-根拠:
-相談先:
-
-ルール:
-- 参照PDFに基づくと断定しない（ページラベルの引用もしない）
-- ページ番号や `[P12]` のような表記は一切出力しない
-- 見出しは必ず `結論:` / `根拠:` / `相談先:` のプレーンテキストのみ
-- 「根拠」には、【参考情報】からの引用/要約と、「一般的には…」のような前置きを使って不確実性を明示する
-- 医療判断（診断/治療の指示）をしない。迷う場合は相談先へ誘導する
-- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
-- 余計な追加セクション（注意/補足など）は出さない
-
-【参考情報】:
-{reference}
-
-質問: {question}
-""".strip()
+    return f"資料に記載がないため、この資料に基づく回答はできません。{qline}".strip()
 
 
 def _build_answer_prompt(*, question: str, context: str) -> str:
@@ -347,16 +297,14 @@ def _build_answer_prompt(*, question: str, context: str) -> str:
 あなたは医療情報の文脈で、厚労省等の配布資料（下の【資料】）に基づいて回答するアシスタントです。
 推測や一般論で補完してはいけません。【資料】に書かれていないことは「資料にない」と明確に述べてください。
 
-必ず次の3セクションだけで出力してください（見出し名は固定、Markdownの # や ## は使わない）:
-結論:
-根拠:
-相談先:
+出力ルール:
+- 回答本文は、日本語で自然な会話文として簡潔に答える（固定フォーマット/見出しは出さない）
+- ページ番号や `[P12]` などのラベル、引用記号は回答本文に出さない（根拠表示はUI側で行う）
+- 【資料】の内容を超える一般論・注意喚起・追加の助言は書かない（資料にある範囲のみ）
 
 ルール:
 - 【資料】に書かれていない内容を断定しない（曖昧にそれっぽく言わない）
-- 「根拠」には【資料】から該当箇所を引用/要約して箇条書きで示す。該当がなければ「資料にない」と書く
-- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
-- 見出しは必ず `結論:` / `根拠:` / `相談先:` のプレーンテキストのみ（Markdown見出しにしない）
+- 資料に書かれている場合でも、医療判断（診断/治療の指示）として断定しない
 
 【資料】:
 {context}
@@ -371,12 +319,7 @@ def rag_chatbot(user_query, *, allow_general_fallback: bool | None = None):
 
     # 4. LLMへの問い合わせ
     if not docs or not context.strip():
-        allow = allow_general_fallback if allow_general_fallback is not None else _env_allow_general_fallback_default()
-        if not allow:
-            return _no_sources_answer(user_query)
-        prompt = _build_general_fallback_prompt(question=user_query, reference=FALLBACK_KNOWLEDGE_BASE)
-        response = ollama.generate(model="gemma2", prompt=prompt)
-        return response["response"]
+        return _no_sources_answer(user_query)
 
     prompt = _build_answer_prompt(question=user_query, context=context)
     
