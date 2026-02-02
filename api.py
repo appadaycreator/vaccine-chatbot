@@ -251,8 +251,35 @@ def _filter_docs_by_keyword_overlap(prompt: str, docs: list[Any]) -> tuple[list[
             kept.append(d)
         else:
             dropped += 1
-    meta = {"keyword_filter": {"enabled": True, "terms": len(terms), "min_overlap": min_overlap, "best": best, "kept": len(kept), "dropped": dropped}}
+    meta = {
+        "keyword_filter": {
+            "enabled": True,
+            "terms": len(terms),
+            "min_overlap": min_overlap,
+            "best": best,
+            "kept": len(kept),
+            "dropped": dropped,
+            "all_dropped": bool(len(kept) == 0 and len(docs) > 0),
+        }
+    }
     return kept, meta
+
+
+def _extract_candidates(docs: list[Any], *, limit: int = 3) -> list[dict[str, Any]]:
+    """
+    「該当箇所は特定できないが、検索で近い候補は出ている」ケース向けの表示用。
+    - これは根拠（sources）ではなく、あくまで候補（candidates）
+    - UIで“元ソースの実際の記載”を見せるために excerpt を返す
+    """
+    if not docs:
+        return []
+    lim = max(1, min(int(limit), 10))
+    picked = list(docs)[:lim]
+    out = _extract_sources(picked)
+    for x in out:
+        if isinstance(x, dict):
+            x["type"] = "candidate"
+    return out
 
 
 def _normalize_answer_text(answer: str, *, fallback_used: bool) -> str:
@@ -2103,12 +2130,24 @@ async def _run_search(
             pass
 
     # 追加の安全策: “質問と関係ないページ”が根拠に混ざるのを抑制（キーワード一致の薄いdocを落とす）
-    docs, kw_meta = _filter_docs_by_keyword_overlap(prompt, list(docs or []))
+    raw_docs = list(docs or [])
+    filtered_docs, kw_meta = _filter_docs_by_keyword_overlap(prompt, raw_docs)
     timings.update(kw_meta)
+    candidates: list[Any] = []
+    try:
+        kf = (kw_meta or {}).get("keyword_filter") if isinstance(kw_meta, dict) else None
+        all_dropped = bool(isinstance(kf, dict) and kf.get("all_dropped") is True)
+        if all_dropped and raw_docs:
+            # “該当箇所は特定できない”扱いにする一方で、UIで確認できるよう候補を残す
+            candidates = raw_docs
+    except Exception:
+        candidates = []
+
+    docs = filtered_docs
 
     timings["total_ms"] = int((time.perf_counter() - t_total0) * 1000)
     context = _format_context(docs)
-    return {"docs": docs, "context": context, "timings": timings}
+    return {"docs": docs, "context": context, "timings": timings, "candidates": candidates}
 
 
 async def _run_generate(prompt: str, context: str, model: str, max_tokens: int, generate_timeout_s: int) -> dict[str, Any]:
@@ -2182,7 +2221,13 @@ async def search_endpoint(payload: SearchRequest, request: Request):
             "timings": timings,
         },
     )
-    return {"context": result["context"], "sources": _extract_sources(docs), "timings": timings}
+    candidates = result.get("candidates") if isinstance(result, dict) else None
+    return {
+        "context": result["context"],
+        "sources": _extract_sources(docs),
+        "candidates": _extract_candidates(list(candidates or [])),
+        "timings": timings,
+    }
 
 
 @app.post("/generate")
@@ -2226,6 +2271,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
     context = search_res["context"]
     timings = dict(search_res["timings"])
     sources = _extract_sources(docs)
+    candidates = _extract_candidates(list(search_res.get("candidates") or [])) if isinstance(search_res, dict) else []
 
     # sources が取れない（=根拠0件）の場合:
     # - 生成せず「資料にない」を返す（資料外の一般論は返さない）
@@ -2245,7 +2291,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
                 "timings": timings,
             },
         )
-        return {"answer": answer, "sources": [], "timings": timings}
+        return {"answer": answer, "sources": [], "candidates": candidates, "timings": timings}
 
     gen_res = await _run_generate(
         prompt=payload.prompt,

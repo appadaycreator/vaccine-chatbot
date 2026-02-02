@@ -1584,6 +1584,7 @@ function main() {
         timings.total_ms = a + b + c;
       }
       const sources = chatRes && Array.isArray(chatRes.sources) ? chatRes.sources : null;
+      const candidates = chatRes && Array.isArray(chatRes.candidates) ? chatRes.candidates : null;
       const noSources = Array.isArray(sources) && sources.length === 0;
       const ans = (chatRes && chatRes.answer) || "";
 
@@ -1591,7 +1592,7 @@ function main() {
       // - 参照箇所は API の sources[].excerpt を使用（PDFから抽出したテキスト）
       // - クリック展開しなくても見えるよう、回答の直下に Markdown で差し込む
       const quoteMd = (() => {
-        const arr = Array.isArray(sources) ? sources : [];
+        const arr = Array.isArray(sources) && sources.length ? sources : Array.isArray(candidates) ? candidates : [];
         const items = arr
           .map((s) => {
             const loc = sourceLocationLabel(s);
@@ -1609,7 +1610,8 @@ function main() {
           .filter(Boolean);
         if (!items.length) return "";
         // 見出しを付けて分かりやすくする（固定フォーマットではなく、単なる付随情報として表示）
-        return `\n\n---\n\n**引用（資料の抜粋）**\n\n${items.join("\n\n")}`;
+        const title = Array.isArray(sources) && sources.length ? "引用（資料の抜粋）" : "検索候補（該当箇所なし）";
+        return `\n\n---\n\n**${title}**\n\n${items.join("\n\n")}`;
       })();
 
       const ansWithQuotes = `${String(ans || "").trim()}${quoteMd}`.trim();
