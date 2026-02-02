@@ -6,6 +6,7 @@ api.log
 api.error.log
 chroma_db/
 pdfs/
+uploads/
 
 # Streamlit / Python caches
 .streamlit/

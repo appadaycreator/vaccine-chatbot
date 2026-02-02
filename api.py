@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 DEFAULT_PDF_PATH = "vaccine_manual.pdf"  # 単体PDF（任意）
 DEFAULT_PDF_DIR = "./pdfs"  # ここにPDFを置くと自動で参照（推奨）
+LEGACY_PDF_DIR = "./uploads"  # 互換: 旧アップロード先を参照対象としても見る（アップロード機能ではない）
 DEFAULT_PERSIST_DIR = "./chroma_db"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 MAX_CONTEXT_CHARS = 5000
@@ -95,6 +96,14 @@ def _list_pdf_paths(pdf_path: str, pdf_dir: str) -> list[str]:
             for f in sorted(os.listdir(pdf_dir)):
                 if f.lower().endswith(".pdf"):
                     paths.append(os.path.join(pdf_dir, f))
+    except Exception:
+        pass
+    # 互換: 旧構成で uploads/ に置かれているPDFも参照対象に含める
+    try:
+        if os.path.isdir(LEGACY_PDF_DIR):
+            for f in sorted(os.listdir(LEGACY_PDF_DIR)):
+                if f.lower().endswith(".pdf"):
+                    paths.append(os.path.join(LEGACY_PDF_DIR, f))
     except Exception:
         pass
     # 重複除去（順序保持）
@@ -285,6 +294,7 @@ def status() -> dict[str, Any]:
         "persist_dir": getattr(app.state, "persist_dir", DEFAULT_PERSIST_DIR),
         "pdf_path": getattr(app.state, "pdf_path", DEFAULT_PDF_PATH),
         "pdf_dir": getattr(app.state, "pdf_dir", DEFAULT_PDF_DIR),
+        "legacy_pdf_dir": LEGACY_PDF_DIR,
         "pdf_count": len(pdfs),
         "last_indexed_at": getattr(app.state, "last_indexed_at", None),
         "init_error": getattr(app.state, "init_error", None),

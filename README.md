@@ -116,6 +116,7 @@ cloudflared tunnel --url http://localhost:8000
 
 - 既定の配置先: `./pdfs/`（環境変数 `PDF_DIR` で変更可能）
 - 既定の単体PDF: `vaccine_manual.pdf`（環境変数 `PDF_PATH` で変更可能）
+  - 互換: `./uploads/` に置かれたPDFも参照対象に含めます（旧構成の名残で、アップロード機能ではありません）
 
 配置後の反映:
 
