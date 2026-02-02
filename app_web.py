@@ -1,8 +1,10 @@
 import os
 import re
+import json
 
 import ollama
 import streamlit as st
+import streamlit.components.v1 as components
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -397,6 +399,64 @@ with col1:
     if st.button("履歴をリセット"):
         st.session_state.messages = []
         st.rerun()
+
+# 会話ログをクリップボードにコピー（Streamlit版）
+def _build_conversation_log_text(messages: list[dict]) -> str:
+    out: list[str] = []
+    for m in messages or []:
+        role = str((m or {}).get("role") or "")
+        who = "あなた" if role == "user" else "アシスタント" if role == "assistant" else role or "メッセージ"
+        content = str((m or {}).get("content") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        head = who
+        text = head + (f"\n{content}" if content else "")
+        sources = (m or {}).get("sources")
+        if isinstance(sources, list) and sources:
+            locs = []
+            for s in sources:
+                loc = s.get("location") or f"{s.get('source','資料')} {s.get('page_label','[P?]')}"
+                locs.append(str(loc))
+            if locs:
+                text += "\n\n根拠（引用）:\n- " + "\n- ".join(locs)
+        out.append(text.strip())
+    return "\n\n---\n\n".join([x for x in out if x])
+
+
+_log_text = _build_conversation_log_text(st.session_state.get("messages") or [])
+components.html(
+    f"""
+<div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin: 0.25rem 0 0.75rem;">
+  <button id="copyConversationLogBtn"
+    style="padding:8px 10px; border-radius:999px; border:1px solid rgba(110,231,183,.55); background: rgba(110,231,183,.14); cursor:pointer; color: inherit;">
+    会話ログをコピー
+  </button>
+  <span id="copyConversationLogStatus" style="opacity:.75; font-size:.9rem;"></span>
+  <script>
+    (function() {{
+      const text = {json.dumps(_log_text)};
+      const btn = document.getElementById("copyConversationLogBtn");
+      const status = document.getElementById("copyConversationLogStatus");
+      if (!text || !text.trim()) {{
+        btn.disabled = true;
+        btn.style.opacity = "0.6";
+        btn.style.cursor = "not-allowed";
+        status.textContent = "（コピーする会話ログがありません）";
+        return;
+      }}
+      btn.addEventListener("click", async () => {{
+        try {{
+          await navigator.clipboard.writeText(text);
+          status.textContent = "コピーしました";
+          setTimeout(() => {{ status.textContent = ""; }}, 2500);
+        }} catch (e) {{
+          status.textContent = "コピーできません（ブラウザの権限/HTTPS等を確認）";
+        }}
+      }});
+    }})();
+  </script>
+</div>
+""",
+    height=70,
+)
 
 # 横展開（UX最低限）: 例ボタン / 再送
 if "queued_prompt" not in st.session_state:

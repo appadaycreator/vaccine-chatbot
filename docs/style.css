@@ -252,6 +252,18 @@ summary:focus-visible {
   padding-bottom: 10px;
 }
 
+.chatTools {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+
+.chatTools .btn {
+  padding: 8px 10px;
+  border-radius: 999px;
+}
+
 .messages {
   height: min(52vh, 520px);
   overflow: auto;

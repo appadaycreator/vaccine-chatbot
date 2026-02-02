@@ -247,6 +247,10 @@ function isLikelyEmbeddingModel(name, embedModel) {
   return lower.includes("embed") || lower.includes("embedding");
 }
 
+// 会話ログ（コピー用）
+// - DOM（innerHTML）から復元すると Markdown/HTML の差分が出やすいため、追加時点の“生”を保持する
+const chatLog = [];
+
 async function copyToClipboard(text) {
   const t = String(text || "");
   if (!t) return false;
@@ -421,7 +425,8 @@ function addMessage(role, content, meta = {}) {
   const who =
     role === "user" ? "あなた" : role === "assistant" ? "アシスタント" : role === "error" ? "エラー" : "システム";
   const left = document.createElement("span");
-  left.textContent = `${who} · ${nowTime()}`;
+  const time = nowTime();
+  left.textContent = `${who} · ${time}`;
   const right = document.createElement("span");
   right.textContent = meta.model ? `モデル: ${meta.model}` : "";
   metaDiv.appendChild(left);
@@ -496,6 +501,20 @@ function addMessage(role, content, meta = {}) {
 
   root.appendChild(div);
   root.scrollTop = root.scrollHeight;
+
+  // copy用の会話ログを保持
+  try {
+    chatLog.push({
+      role: String(role || ""),
+      who,
+      time,
+      model: meta && meta.model ? String(meta.model) : "",
+      content: String(content || ""),
+      sources: meta && Array.isArray(meta.sources) ? meta.sources : null,
+    });
+  } catch {
+    /* noop */
+  }
 }
 
 async function postJson(url, payload, { signal } = {}) {
@@ -790,6 +809,32 @@ function summarizeApiError(err) {
   return text || "不明なエラー";
 }
 
+function buildConversationLogText({ includeSources = true } = {}) {
+  const items = Array.isArray(chatLog) ? chatLog : [];
+  const parts = [];
+  for (const m of items) {
+    const who = m && m.who ? String(m.who) : "メッセージ";
+    const time = m && m.time ? String(m.time) : "";
+    const model = m && m.model ? String(m.model) : "";
+    const head = `${who}${time ? ` · ${time}` : ""}${model ? ` · モデル: ${model}` : ""}`.trim();
+    const body = String((m && m.content) || "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").trim();
+    let text = head;
+    if (body) text += `\n${body}`;
+
+    if (includeSources && m && Array.isArray(m.sources) && m.sources.length) {
+      const locs = m.sources
+        .map((x) => sourceLocationLabel(x))
+        .map((s) => String(s || "").trim())
+        .filter(Boolean);
+      if (locs.length) {
+        text += `\n\n根拠（引用）:\n- ${locs.join("\n- ")}`;
+      }
+    }
+    parts.push(text.trim());
+  }
+  return parts.filter(Boolean).join("\n\n---\n\n");
+}
+
 function main() {
   const apiBaseEl = $("apiBase");
   const modelEl = $("model");
@@ -798,6 +843,7 @@ function main() {
   const sendBtn = $("send");
   const resendBtn = $("resend");
   const cancelBtn = $("cancel");
+  const copyChatLogBtn = document.getElementById("copyChatLog");
   const saveBtn = $("saveApiBase");
   const reloadBtn = $("reloadIndex");
   const sourcesStatusEl = $("sourcesStatus");
@@ -896,6 +942,22 @@ function main() {
     window.addEventListener("hashchange", () => {
       if (window.location && window.location.hash === "#prompt") {
         focusPrompt({ smooth: true });
+      }
+    });
+  }
+
+  if (copyChatLogBtn) {
+    copyChatLogBtn.addEventListener("click", async () => {
+      const text = buildConversationLogText({ includeSources: true });
+      if (!text.trim()) {
+        setStatus("コピーする会話ログがありません。", true);
+        return;
+      }
+      const ok = await copyToClipboard(text);
+      if (ok) {
+        setStatus("会話ログをクリップボードにコピーしました。");
+      } else {
+        setStatus("会話ログをコピーできませんでした（ブラウザの権限/HTTPS等を確認してください）。", true);
       }
     });
   }
