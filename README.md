@@ -279,6 +279,16 @@ curl -sS http://127.0.0.1:8000/status
 起動直後に `api.log` へ、起動設定（`PDF_DIR` / `CHROMA_PERSIST_DIR` 等）と `git_sha` / `started_at` が1行JSONで出ます。  
 **「修正したのに挙動が変わらない」** と感じたら、まず `/status` の `git_sha` が想定どおりか確認してください。
 
+#### 「資料にない」ばかりで困る場合（UX優先の既定ON）
+
+古いUI（GitHub Pages）から叩いていて `allow_general_fallback` を送っていない場合でも、サーバー側既定で一般説明フォールバックをONにできます:
+
+```bash
+export ALLOW_GENERAL_FALLBACK_DEFAULT=1
+```
+
+launchd を使う場合は、`~/Library/LaunchAgents/com.vaccine.api.plist` の `EnvironmentVariables` に追加してから再起動してください。
+
 #### 実働コード（ブランチ/コミット）を固定する運用
 
 - 本番の実働は **launchd が `uvicorn api:app` をこのリポジトリの作業ディレクトリで起動**します（テンプレ: `launchd/com.vaccine.api.plist`）。
@@ -415,7 +425,7 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
 - **一般説明フォールバックをONにする**
   - docs UI: 設定のチェックボックスをON
   - API: `POST /chat` に `allow_general_fallback: true` を渡す
-  - サーバー既定: `ALLOW_GENERAL_FALLBACK_DEFAULT=1`（クライアントが未指定の場合の既定値）
+  - サーバー既定: `ALLOW_GENERAL_FALLBACK_DEFAULT`（クライアントが未指定の場合の既定値。既定はON、OFFにしたい場合は `0`）
 
 ### PDF解析の精度を上げる（段組/ヘッダ/改行ノイズ対策）
 
