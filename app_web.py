@@ -1,12 +1,11 @@
-import streamlit as st
-import ollama
-import hashlib
 import os
-import tempfile
+
+import ollama
+import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ページの設定
 st.set_page_config(page_title="ワクチン接種後健康観察アシスタント", page_icon="🏥")
@@ -19,9 +18,7 @@ with st.sidebar:
     llm_model = st.selectbox("回答モデル", ["gemma2", "llama3.1"], index=0)
     k = st.slider("検索の強さ（k値）", min_value=1, max_value=10, value=3, step=1)
     st.caption("埋め込みモデル: `nomic-embed-text`（固定）")
-
-    uploaded_pdf = st.file_uploader("PDFアップロード（任意）", type=["pdf"])
-    st.caption("未アップロード時は `vaccine_manual.pdf` を使用します。")
+    st.caption("PDFはサーバー側で `./pdfs/`（環境変数 `PDF_DIR`）に配置して利用します。")
 
 
 def _normalize_docs_source(docs, source_label: str):
@@ -32,47 +29,63 @@ def _normalize_docs_source(docs, source_label: str):
 
 
 @st.cache_resource(show_spinner=False)
-def _build_vectorstore_from_path(pdf_path: str):
-    loader = PyPDFLoader(pdf_path)
-    docs = loader.load()
-    docs = _normalize_docs_source(docs, os.path.basename(pdf_path))
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    chunks = text_splitter.split_documents(docs)
+def _build_vectorstore_from_paths(paths: list[str], signature: str):
+    # signature はキャッシュキー安定化のため
+    chunks = []
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    for p in paths:
+        loader = PyPDFLoader(p)
+        docs = loader.load()
+        docs = _normalize_docs_source(docs, os.path.basename(p))
+        chunks.extend([c for c in splitter.split_documents(docs) if (c.page_content or "").strip()])
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
     return Chroma.from_documents(documents=chunks, embedding=embeddings)
 
 
-@st.cache_resource(show_spinner=False)
-def _build_vectorstore_from_bytes(pdf_bytes: bytes, filename: str, file_hash_hex: str):
-    # file_hash_hex はキャッシュキー安定化のため（bytesだけでも良いが、明示しておく）
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
-        f.write(pdf_bytes)
-        tmp_path = f.name
+def _list_pdf_paths() -> list[str]:
+    pdf_dir = os.environ.get("PDF_DIR", "./pdfs")
+    pdf_path = os.environ.get("PDF_PATH", "vaccine_manual.pdf")
+    paths: list[str] = []
+    if pdf_path and os.path.exists(pdf_path) and pdf_path.lower().endswith(".pdf"):
+        paths.append(pdf_path)
     try:
-        loader = PyPDFLoader(tmp_path)
-        docs = loader.load()
-        docs = _normalize_docs_source(docs, filename or "uploaded.pdf")
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-        chunks = text_splitter.split_documents(docs)
-        embeddings = OllamaEmbeddings(model="nomic-embed-text")
-        return Chroma.from_documents(documents=chunks, embedding=embeddings)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if pdf_dir and os.path.isdir(pdf_dir):
+            for f in sorted(os.listdir(pdf_dir)):
+                if f.lower().endswith(".pdf"):
+                    paths.append(os.path.join(pdf_dir, f))
+    except Exception:
+        pass
+    # 重複除去
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for p in paths:
+        ap = os.path.abspath(p)
+        if ap in seen:
+            continue
+        seen.add(ap)
+        uniq.append(p)
+    return uniq
 
+
+def _signature(paths: list[str]) -> str:
+    parts: list[str] = []
+    for p in paths:
+        try:
+            st_ = os.stat(p)
+            parts.append(f"{os.path.abspath(p)}|{int(st_.st_size)}|{float(st_.st_mtime)}")
+        except Exception:
+            parts.append(f"{os.path.abspath(p)}|NA|NA")
+    return "\n".join(sorted(parts))
+
+paths = _list_pdf_paths()
 try:
-    if uploaded_pdf is not None:
-        pdf_bytes = uploaded_pdf.getvalue()
-        pdf_hash = hashlib.sha256(pdf_bytes).hexdigest()
-        with st.spinner("アップロードPDFを解析して知識ベースを構築中...（初回は時間がかかります）"):
-            vectorstore = _build_vectorstore_from_bytes(pdf_bytes, uploaded_pdf.name, pdf_hash)
-        st.success(f"資料の読み込みが完了しました（{uploaded_pdf.name}）。")
-    else:
-        with st.spinner("既定PDFを解析して知識ベースを構築中...（初回は時間がかかります）"):
-            vectorstore = _build_vectorstore_from_path("vaccine_manual.pdf")
-        st.success("資料の読み込みが完了しました（vaccine_manual.pdf）。")
+    if not paths:
+        st.error("参照するPDFが見つかりませんでした。`vaccine_manual.pdf` または `./pdfs/` にPDFを配置してください。")
+        st.stop()
+    sig = _signature(paths)
+    with st.spinner("PDFを解析して知識ベースを構築中...（初回は時間がかかります）"):
+        vectorstore = _build_vectorstore_from_paths(paths, sig)
+    st.success(f"資料の読み込みが完了しました（{len(paths)}件）。")
 except Exception as e:
     st.error(f"PDFを読み込めませんでした: {e}")
     st.stop()

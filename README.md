@@ -110,18 +110,19 @@ cloudflared tunnel --url http://localhost:8000
 
 ログに表示される `https://xxxx.trycloudflare.com` のようなURLを、GitHub Pagesの画面で **API Base URL** に貼り付けて `/chat` が叩けるか確認してください。
 
-### GitHub Pagesからソース（PDF）を追加する
+### PDFを追加する（アップロード機能は無し）
 
-GitHub Pagesの画面にある **「ソース追加（PDFアップロード）」** からPDFをアップロードできます。アップロードされたPDFは **Mac mini側に保存**され、RAGの検索対象に追加されます。
+ブラウザからのPDFアップロードは使わず、**Mac mini 側でPDFを配置して参照**します。
 
-- API: `POST /sources/upload`（multipart）
-- 一覧: `GET /sources`
+- 既定の配置先: `./pdfs/`（環境変数 `PDF_DIR` で変更可能）
+- 既定の単体PDF: `vaccine_manual.pdf`（環境変数 `PDF_PATH` で変更可能）
 
-`GET /sources` は **「元のファイル名（資料名）」** を優先して返します（保存時は重複排除のため `sha256_元ファイル名.pdf` のような保存名になります）。
+配置後の反映:
 
-保存先（既定）:
+- 自動: 次回の `/chat` 実行時に、PDFの増減/更新を検知して自動で再インデックスします
+- 手動: `POST /reload` で強制的に再インデックスできます
 
-- `./uploads`（環境変数 `UPLOAD_DIR` で変更可能）
+一覧: `GET /sources`
 
 ## 常時稼働（Mac miniを「止まらないサーバー」にする）
 
@@ -177,6 +178,8 @@ curl -sS http://127.0.0.1:8000/status
 ### エンドポイント
 
 - `GET /health`: ヘルスチェック
+- `GET /sources`: 参照するPDF一覧
+- `POST /reload`: PDFを再インデックス（強制）
 - `POST /chat`: RAGで回答
 
 `POST /chat` の例:
@@ -194,6 +197,7 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
 環境変数:
 
 - `PDF_PATH`: 取り込むPDFパス（既定: `vaccine_manual.pdf`）
+- `PDF_DIR`: 取り込むPDFディレクトリ（既定: `./pdfs`）
 - `CHROMA_PERSIST_DIR`: Chroma永続化ディレクトリ（既定: `./chroma_db`）
 
 ### できること
@@ -202,14 +206,14 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
 - **サイドバー設定**:
   - 回答モデル切替（`gemma2` ↔ `llama3.1`）
   - 検索の強さ（k値）をスライダーで調整
-- **PDFアップロード**: 既定の `vaccine_manual.pdf` ではなく、ブラウザからPDFをアップロードして検索対象にできます
+- **PDF配置で知識追加**: `./pdfs/` にPDFを置くと、次回の実行時に自動で再インデックスして検索対象に反映します
 
 ※初回はPDF解析・ベクトル化が走るため数分かかる場合があります。
 
 ## 注意（PDFについて）
 
 `.gitignore` で `*.pdf` を除外しているため、**PDFはGitにコミットされません**。  
-手元に `vaccine_manual.pdf` を置くか、Web版ではサイドバーからPDFをアップロードして利用してください。
+手元に `vaccine_manual.pdf` を置くか、`./pdfs/` にPDFを配置して利用してください。
 
 ## トラブルシューティング
 

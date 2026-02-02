@@ -38,6 +38,8 @@
         <!-- 任意: PDF/DBパスを変えたい場合に使う -->
         <key>PDF_PATH</key>
         <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/vaccine_manual.pdf</string>
+        <key>PDF_DIR</key>
+        <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/pdfs</string>
         <key>CHROMA_PERSIST_DIR</key>
         <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/chroma_db</string>
     </dict>

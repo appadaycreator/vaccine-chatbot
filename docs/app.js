@@ -116,24 +116,6 @@ async function getSources(apiBase) {
   return body;
 }
 
-async function uploadPdf(apiBase, file) {
-  const form = new FormData();
-  form.append("file", file);
-  const res = await fetch(`${apiBase}/sources/upload`, { method: "POST", body: form });
-  const bodyText = await res.text();
-  let body;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    body = { raw: bodyText };
-  }
-  if (!res.ok) {
-    const detail = body && body.detail ? body.detail : bodyText;
-    throw new Error(`HTTP ${res.status}: ${detail}`);
-  }
-  return body;
-}
-
 function setStatus(text, isError = false) {
   const root = $("messages");
   const p = document.createElement("div");
@@ -149,8 +131,6 @@ function main() {
   const kEl = $("k");
   const promptEl = $("prompt");
   const saveBtn = $("saveApiBase");
-  const pdfFileEl = $("pdfFile");
-  const uploadBtn = $("uploadPdf");
   const sourcesStatusEl = $("sourcesStatus");
   const sourcesListEl = $("sourcesList");
 
@@ -175,7 +155,11 @@ function main() {
         sourcesListEl.textContent = "";
         return;
       }
-      sourcesStatusEl.textContent = `登録済みソース: ${data.items.length} 件`;
+      const indexed = typeof data.indexed === "boolean" ? data.indexed : null;
+      sourcesStatusEl.textContent =
+        indexed === null
+          ? `登録済みソース: ${data.items.length} 件`
+          : `登録済みソース: ${data.items.length} 件（${indexed ? "インデックス済" : "未インデックス"}）`;
       if (!data.items.length) {
         sourcesListEl.innerHTML = `<div class="muted small">（まだ登録されていません）</div>`;
         return;
@@ -186,7 +170,7 @@ function main() {
           const original = it && it.original_filename ? String(it.original_filename) : "";
           const saved = it && it.filename ? String(it.filename) : "";
           const label = original || saved || (it && it.path ? String(it.path) : "");
-          const showSaved = type === "upload" && saved && original && saved !== original;
+          const showSaved = false;
           const meta = [];
           if (showSaved) meta.push(`保存名: ${saved}`);
           if (it && typeof it.size_bytes === "number") meta.push(`${Math.round(it.size_bytes / 1024)}KB`);
@@ -202,32 +186,6 @@ function main() {
       sourcesListEl.textContent = "";
     }
   }
-
-  uploadBtn.addEventListener("click", async () => {
-    const apiBase = normalizeApiBase(apiBaseEl.value);
-    if (!apiBase) {
-      setStatus("API Base URL を入力してください。", true);
-      return;
-    }
-    const f = pdfFileEl.files && pdfFileEl.files[0] ? pdfFileEl.files[0] : null;
-    if (!f) {
-      setStatus("アップロードするPDFを選択してください。", true);
-      return;
-    }
-    if (f.type && f.type !== "application/pdf") {
-      setStatus("PDFファイルを選択してください。", true);
-      return;
-    }
-    setStatus(`PDFをアップロード中…（${f.name}）`);
-    try {
-      await uploadPdf(apiBase, f);
-      setStatus(`アップロード完了: ${f.name}`);
-      pdfFileEl.value = "";
-      await refreshSources();
-    } catch (e) {
-      setStatus(`アップロード失敗: ${e && e.message ? e.message : String(e)}`, true);
-    }
-  });
 
   $("chatForm").addEventListener("submit", async (e) => {
     e.preventDefault();

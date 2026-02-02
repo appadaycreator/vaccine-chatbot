@@ -57,15 +57,11 @@
       </section>
 
       <section class="card">
-        <h2>ソース追加（PDFアップロード）</h2>
+        <h2>参照ソース（PDF一覧）</h2>
         <p class="muted">
-          ここでアップロードしたPDFは、Mac mini側に保存され、RAGの検索対象に追加されます（GitHub Pages側には保存されません）。
+          APIサーバー側で <code>PDF_DIR</code>（既定: <code>./pdfs</code>）に置かれたPDFを参照します。
+          反映が必要な場合はAPIの <code>/reload</code> で再インデックスできます。
         </p>
-        <div class="row">
-          <label for="pdfFile">PDF</label>
-          <input id="pdfFile" type="file" accept="application/pdf" />
-          <button id="uploadPdf" class="btn btn--secondary" type="button">アップロード</button>
-        </div>
         <div class="muted small" id="sourcesStatus"></div>
         <div class="muted small" id="sourcesList"></div>
       </section>

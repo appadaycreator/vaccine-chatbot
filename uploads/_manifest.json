@@ -1,0 +1,12 @@
+{
+  "0e775e6251a3ad0f_001558100.pdf": {
+    "chunk_count": 0,
+    "index_error": "PDFからテキストを抽出できませんでした（スキャンPDF等の可能性）",
+    "indexed": false,
+    "original_filename": "001558100.pdf",
+    "saved_filename": "0e775e6251a3ad0f_001558100.pdf",
+    "sha256_16": "0e775e6251a3ad0f",
+    "size_bytes": 5848761,
+    "uploaded_at": "2026-02-02T01:55:30.998415+00:00"
+  }
+}
