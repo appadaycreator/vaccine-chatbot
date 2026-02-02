@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -672,13 +673,151 @@ def _safe_reset_persist_dir(persist_dir: str) -> None:
     os.makedirs(persist_dir, exist_ok=True)
 
 
+def _get_splitter() -> RecursiveCharacterTextSplitter:
+    """
+    PDF取り込み用の分割設定。
+    PDFは改行ノイズが多く短文が増えやすいので、デフォルトはやや大きめに取る。
+    """
+    try:
+        chunk_size = int(os.environ.get("CHUNK_SIZE", "900"))
+    except Exception:
+        chunk_size = 900
+    try:
+        chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "120"))
+    except Exception:
+        chunk_overlap = 120
+    # 安全域
+    chunk_size = max(200, min(chunk_size, 5000))
+    chunk_overlap = max(0, min(chunk_overlap, max(0, chunk_size - 1)))
+    return RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+
+def _normalize_newlines(text: str) -> str:
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _clean_pdf_text(text: str) -> str:
+    """
+    PDF抽出テキストの最低限のクリーニング。
+    - 過剰な空白/空行を整理
+    - 英単語のハイフネーション改行を結合（日本語本文への影響を最小化）
+    """
+    t = _normalize_newlines(text)
+    # 行末空白の除去
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    # 連続空行の圧縮
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    # 英単語ハイフネーション: "exam-\nple" -> "example"
+    t = re.sub(r"(?<=\w)-\n(?=\w)", "", t)
+    return t.strip()
+
+
+def _strip_repeated_header_footer(docs: list[Any], *, top_n: int = 2, bottom_n: int = 2, min_ratio: float = 0.6) -> dict[str, Any]:
+    """
+    ページ毎に繰り返されるヘッダ/フッタ（タイトル行やページ番号等）を軽く除去する。
+    完全自動は危険なので、各ページの先頭/末尾行だけを対象に、出現頻度が高い短い行のみ除去する。
+    """
+    pages = len(docs)
+    if pages <= 1:
+        return {"removed_top": 0, "removed_bottom": 0}
+
+    def _edge_lines(text: str) -> tuple[list[str], list[str]]:
+        lines = [ln.strip() for ln in _normalize_newlines(text).split("\n")]
+        lines = [ln for ln in lines if ln]
+        return lines[:top_n], (lines[-bottom_n:] if lines else [])
+
+    top_counter: Counter[str] = Counter()
+    bottom_counter: Counter[str] = Counter()
+    for d in docs:
+        top, bottom = _edge_lines(getattr(d, "page_content", "") or "")
+        top_counter.update(top)
+        bottom_counter.update(bottom)
+
+    threshold = max(2, int(pages * min_ratio))
+    # 短すぎる/長すぎる行は除外（誤除去を減らす）
+    def _pick(counter: Counter[str]) -> set[str]:
+        out: set[str] = set()
+        for ln, c in counter.items():
+            if c >= threshold and 2 <= len(ln) <= 80:
+                out.add(ln)
+        return out
+
+    top_rm = _pick(top_counter)
+    bottom_rm = _pick(bottom_counter)
+
+    removed_top = 0
+    removed_bottom = 0
+    for d in docs:
+        raw = _normalize_newlines(getattr(d, "page_content", "") or "")
+        lines = [ln.rstrip() for ln in raw.split("\n")]
+        # 先頭側
+        i = 0
+        while i < len(lines) and lines[i].strip() == "":
+            i += 1
+        for _ in range(top_n):
+            if i < len(lines) and lines[i].strip() in top_rm:
+                lines[i] = ""
+                removed_top += 1
+                i += 1
+            else:
+                break
+        # 末尾側
+        j = len(lines) - 1
+        while j >= 0 and lines[j].strip() == "":
+            j -= 1
+        for _ in range(bottom_n):
+            if j >= 0 and lines[j].strip() in bottom_rm:
+                lines[j] = ""
+                removed_bottom += 1
+                j -= 1
+            else:
+                break
+        d.page_content = _clean_pdf_text("\n".join(lines))
+
+    return {"removed_top": removed_top, "removed_bottom": removed_bottom}
+
+
+def _load_pdf_docs_best_effort(pdf_path: str) -> tuple[list[Any], str]:
+    """
+    可能ならPyMuPDF系ローダを優先（レイアウト/段組に強いことが多い）。
+    依存が無い場合は PyPDFLoader にフォールバック。
+    `PDF_LOADER` で明示指定も可能（auto/pymupdf/pypdf）。
+    """
+    prefer = (os.environ.get("PDF_LOADER", "auto") or "auto").strip().lower()
+
+    def _try_pymupdf() -> Optional[list[Any]]:
+        try:
+            # langchain-communityに存在し、かつ pymupdf が入っていると動く
+            from langchain_community.document_loaders import PyMuPDFLoader  # type: ignore
+
+            return PyMuPDFLoader(pdf_path).load()
+        except Exception:
+            return None
+
+    if prefer in ("pymupdf", "fitz"):
+        docs = _try_pymupdf()
+        if docs is None:
+            raise RuntimeError("PDF_LOADER=pymupdf が指定されていますが、PyMuPDFLoader（pymupdf）が利用できません。")
+        return docs, "pymupdf"
+    if prefer in ("pypdf", "pdf"):
+        return PyPDFLoader(pdf_path).load(), "pypdf"
+
+    # auto
+    docs = _try_pymupdf()
+    if docs is not None:
+        return docs, "pymupdf"
+    return PyPDFLoader(pdf_path).load(), "pypdf"
+
+
 def _split_pdf_docs(pdf_path: str, source_label: str):
-    loader = PyPDFLoader(pdf_path)
-    docs = loader.load()
+    docs, loader_used = _load_pdf_docs_best_effort(pdf_path)
     for d in docs:
         d.metadata = dict(d.metadata or {})
         d.metadata["source"] = source_label
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        d.metadata["loader"] = loader_used
+        d.page_content = _clean_pdf_text(getattr(d, "page_content", "") or "")
+    _strip_repeated_header_footer(docs)
+    splitter = _get_splitter()
     chunks = splitter.split_documents(docs)
     return [c for c in chunks if (c.page_content or "").strip()]
 
@@ -688,20 +827,25 @@ def _analyze_and_split_pdf(pdf_path: str) -> tuple[list[Any], dict[str, Any]]:
     PDFを読み込み、チャンク化して返す。
     併せて「テキスト抽出できたか（OCR不足か）」等のユーザー向け情報を返す。
     """
-    loader = PyPDFLoader(pdf_path)
-    docs = loader.load()
+    docs, loader_used = _load_pdf_docs_best_effort(pdf_path)
     pages = len(docs)
+    for d in docs:
+        d.page_content = _clean_pdf_text(getattr(d, "page_content", "") or "")
+
+    strip_rep = _strip_repeated_header_footer(docs)
+
     extracted_chars = 0
     for d in docs:
-        extracted_chars += len((d.page_content or "").strip())
+        extracted_chars += len((getattr(d, "page_content", "") or "").strip())
 
     # source は表示用に basename を固定
     source_label = os.path.basename(pdf_path)
     for d in docs:
         d.metadata = dict(d.metadata or {})
         d.metadata["source"] = source_label
+        d.metadata["loader"] = loader_used
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    splitter = _get_splitter()
     chunks = splitter.split_documents(docs)
     chunks = [c for c in chunks if (c.page_content or "").strip()]
     chunk_count = len(chunks)
@@ -721,6 +865,8 @@ def _analyze_and_split_pdf(pdf_path: str) -> tuple[list[Any], dict[str, Any]]:
         "pages": pages,
         "extracted_chars": extracted_chars,
         "chunk_count": chunk_count,
+        "loader": loader_used,
+        "cleanup": strip_rep,
         "hints": hints,
     }
     return chunks, report

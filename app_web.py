@@ -1,4 +1,5 @@
 import os
+import re
 
 import ollama
 import streamlit as st
@@ -80,6 +81,108 @@ def _normalize_newlines(text: str) -> str:
     return (text or "").replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _clean_pdf_text(text: str) -> str:
+    t = _normalize_newlines(text)
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    t = re.sub(r"(?<=\w)-\n(?=\w)", "", t)
+    return t.strip()
+
+
+def _strip_repeated_header_footer(docs: list, *, top_n: int = 2, bottom_n: int = 2, min_ratio: float = 0.6) -> None:
+    pages = len(docs)
+    if pages <= 1:
+        return
+
+    def _edge_lines(text: str):
+        lines = [ln.strip() for ln in _normalize_newlines(text).split("\n")]
+        lines = [ln for ln in lines if ln]
+        return lines[:top_n], (lines[-bottom_n:] if lines else [])
+
+    from collections import Counter
+
+    top_counter = Counter()
+    bottom_counter = Counter()
+    for d in docs:
+        top, bottom = _edge_lines(getattr(d, "page_content", "") or "")
+        top_counter.update(top)
+        bottom_counter.update(bottom)
+
+    threshold = max(2, int(pages * min_ratio))
+
+    def _pick(counter):
+        out = set()
+        for ln, c in counter.items():
+            if c >= threshold and 2 <= len(ln) <= 80:
+                out.add(ln)
+        return out
+
+    top_rm = _pick(top_counter)
+    bottom_rm = _pick(bottom_counter)
+
+    for d in docs:
+        raw = _normalize_newlines(getattr(d, "page_content", "") or "")
+        lines = [ln.rstrip() for ln in raw.split("\n")]
+        i = 0
+        while i < len(lines) and lines[i].strip() == "":
+            i += 1
+        for _ in range(top_n):
+            if i < len(lines) and lines[i].strip() in top_rm:
+                lines[i] = ""
+                i += 1
+            else:
+                break
+        j = len(lines) - 1
+        while j >= 0 and lines[j].strip() == "":
+            j -= 1
+        for _ in range(bottom_n):
+            if j >= 0 and lines[j].strip() in bottom_rm:
+                lines[j] = ""
+                j -= 1
+            else:
+                break
+        d.page_content = _clean_pdf_text("\n".join(lines))
+
+
+def _get_splitter() -> RecursiveCharacterTextSplitter:
+    try:
+        chunk_size = int(os.environ.get("CHUNK_SIZE", "900"))
+    except Exception:
+        chunk_size = 900
+    try:
+        chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "120"))
+    except Exception:
+        chunk_overlap = 120
+    chunk_size = max(200, min(chunk_size, 5000))
+    chunk_overlap = max(0, min(chunk_overlap, max(0, chunk_size - 1)))
+    return RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+
+def _load_pdf_docs_best_effort(pdf_path: str):
+    prefer = (os.environ.get("PDF_LOADER", "auto") or "auto").strip().lower()
+
+    def _try_pymupdf():
+        try:
+            from langchain_community.document_loaders import PyMuPDFLoader  # type: ignore
+
+            return PyMuPDFLoader(pdf_path).load()
+        except Exception:
+            return None
+
+    if prefer in ("pymupdf", "fitz"):
+        docs = _try_pymupdf()
+        if docs is None:
+            raise RuntimeError("PDF_LOADER=pymupdf が指定されていますが、PyMuPDFLoader（pymupdf）が利用できません。")
+        return docs, "pymupdf"
+    if prefer in ("pypdf", "pdf"):
+        return PyPDFLoader(pdf_path).load(), "pypdf"
+
+    docs = _try_pymupdf()
+    if docs is not None:
+        return docs, "pymupdf"
+    return PyPDFLoader(pdf_path).load(), "pypdf"
+
+
 def _make_excerpt(text: str, max_lines: int = 10, max_chars: int = 900) -> str:
     raw = _normalize_newlines(text).strip()
     if not raw:
@@ -110,11 +213,15 @@ def _make_excerpt(text: str, max_lines: int = 10, max_chars: int = 900) -> str:
 def _build_vectorstore_from_paths(paths: list[str], signature: str):
     # signature はキャッシュキー安定化のため
     chunks = []
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    splitter = _get_splitter()
     for p in paths:
-        loader = PyPDFLoader(p)
-        docs = loader.load()
+        docs, loader_used = _load_pdf_docs_best_effort(p)
         docs = _normalize_docs_source(docs, os.path.basename(p))
+        for d in docs:
+            d.metadata = dict(d.metadata or {})
+            d.metadata["loader"] = loader_used
+            d.page_content = _clean_pdf_text(getattr(d, "page_content", "") or "")
+        _strip_repeated_header_footer(docs)
         chunks.extend([c for c in splitter.split_documents(docs) if (c.page_content or "").strip()])
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
     return Chroma.from_documents(documents=chunks, embedding=embeddings)

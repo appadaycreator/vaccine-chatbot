@@ -60,13 +60,15 @@
         <h2>RAG（PDF取り込み・検索）</h2>
         <ul class="muted">
           <li><code>LangChain</code>: PDF読み込み/分割、ベクトル検索の統合</li>
-          <li><code>PyPDFLoader</code>: PDF→テキスト抽出（スキャンPDFはOCRが必要な場合あり）</li>
+          <li><code>PyPDFLoader</code>: PDF→テキスト抽出（標準フォールバック）</li>
+          <li><code>PyMuPDFLoader</code>（任意）: PDF→テキスト抽出（段組/レイアウトで有利な場合あり、環境変数 <code>PDF_LOADER=pymupdf</code>）</li>
           <li><code>RecursiveCharacterTextSplitter</code>: チャンク分割</li>
           <li><code>ChromaDB</code>: ベクトルDB（永続化ディレクトリ: 既定 <code>./chroma_db</code>）</li>
         </ul>
         <p class="muted small">
           PDFは <code>./pdfs</code>（環境変数 <code>PDF_DIR</code>）に配置します。追加/更新後は <code>POST /reload</code> で索引（検索の準備）を作り直して反映できます。
           スキャンPDFでテキスト抽出できない場合は「要OCR」として案内されます。
+          チャンク分割は <code>CHUNK_SIZE</code> / <code>CHUNK_OVERLAP</code> で調整できます。
         </p>
       </section>
 
@@ -99,6 +101,7 @@
           <li><code>langchain-text-splitters==1.1.0</code></li>
           <li><code>chromadb==1.4.1</code></li>
           <li><code>pypdf==6.6.2</code></li>
+          <li><code>pymupdf</code>（任意）: <code>PyMuPDFLoader</code> を使う場合</li>
           <li><code>fastapi==0.117.1</code></li>
           <li><code>uvicorn[standard]==0.40.0</code></li>
           <li><code>streamlit==1.53.1</code>（別UI/デモ用）</li>

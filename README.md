@@ -178,6 +178,7 @@ cloudflared tunnel --url http://localhost:8000
 
 - まず確認: `GET /health` と `GET /status` が返るか
 - 404 になる場合: `cloudflared tunnel --url http://localhost:8000` で発行されたURLを貼り直してください
+- 補足: **環境チェック（`/diagnostics`）が404だったURLは、次回のページ再読み込みでは自動的にスキップ**します（コンソールが汚れないようにするため）。URLを直した/サーバーを更新した場合は、APIのURLを入力し直して「保存」を押すと再判定します。
 
 ### PDFを追加する（アップロード機能は無し）
 
@@ -332,6 +333,12 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
 - `PDF_PATH`: 取り込むPDFパス（既定: `vaccine_manual.pdf`）
 - `PDF_DIR`: 取り込むPDFディレクトリ（既定: `./pdfs`）
 - `CHROMA_PERSIST_DIR`: Chroma永続化ディレクトリ（既定: `./chroma_db`）
+- `PDF_LOADER`: PDF抽出ローダの選択（既定: `auto`）
+  - `auto`: 可能なら `PyMuPDFLoader` を優先し、無ければ `PyPDFLoader` にフォールバック
+  - `pymupdf`: `PyMuPDFLoader` を強制（未導入の場合はエラー）
+  - `pypdf`: `PyPDFLoader` を強制
+- `CHUNK_SIZE`: PDFチャンクサイズ（既定: `900`）
+- `CHUNK_OVERLAP`: PDFチャンクの重なり（既定: `120`）
 
 ### できること
 
@@ -352,6 +359,30 @@ APIサーバーは起動時に `./chroma_db` を読み込みます。未作成�
 
 `.gitignore` で `*.pdf` を除外しているため、**PDFはGitにコミットされません**。  
 手元に `vaccine_manual.pdf` を置くか、`./pdfs/` にPDFを配置して利用してください。
+
+### PDF解析の精度を上げる（段組/ヘッダ/改行ノイズ対策）
+
+本プロジェクトは、PDF取り込み時に **抽出テキストのクリーニング**（過剰改行・空白・英単語ハイフン改行）と、**繰り返しヘッダ/フッタの軽い除去**を行います（横展開: **API / Streamlit**）。
+
+さらにPDFによっては、`PyPDFLoader` より `PyMuPDFLoader`（PyMuPDF）の方が抽出精度が上がることがあります:
+
+```bash
+. .venv/bin/activate
+pip install pymupdf
+```
+
+切替:
+
+```bash
+export PDF_LOADER=pymupdf
+```
+
+分割（検索の当たり方）が合わない場合は、チャンク設定を調整してください:
+
+```bash
+export CHUNK_SIZE=900
+export CHUNK_OVERLAP=120
+```
 
 ## トラブルシューティング
 ### まず「なぜ動かないか」を確認する（推奨）

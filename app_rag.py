@@ -1,16 +1,71 @@
 import ollama
+import os
+import re
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import OllamaEmbeddings
 
+
+def _normalize_newlines(text: str) -> str:
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _clean_pdf_text(text: str) -> str:
+    t = _normalize_newlines(text)
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    t = re.sub(r"(?<=\w)-\n(?=\w)", "", t)
+    return t.strip()
+
+
+def _get_splitter() -> RecursiveCharacterTextSplitter:
+    try:
+        chunk_size = int(os.environ.get("CHUNK_SIZE", "900"))
+    except Exception:
+        chunk_size = 900
+    try:
+        chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "120"))
+    except Exception:
+        chunk_overlap = 120
+    chunk_size = max(200, min(chunk_size, 5000))
+    chunk_overlap = max(0, min(chunk_overlap, max(0, chunk_size - 1)))
+    return RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+
+
+def _load_pdf_docs_best_effort(pdf_path: str):
+    prefer = (os.environ.get("PDF_LOADER", "auto") or "auto").strip().lower()
+
+    def _try_pymupdf():
+        try:
+            from langchain_community.document_loaders import PyMuPDFLoader  # type: ignore
+
+            return PyMuPDFLoader(pdf_path).load()
+        except Exception:
+            return None
+
+    if prefer in ("pymupdf", "fitz"):
+        docs = _try_pymupdf()
+        if docs is None:
+            raise RuntimeError("PDF_LOADER=pymupdf が指定されていますが、PyMuPDFLoader（pymupdf）が利用できません。")
+        return docs
+    if prefer in ("pypdf", "pdf"):
+        return PyPDFLoader(pdf_path).load()
+
+    docs = _try_pymupdf()
+    if docs is not None:
+        return docs
+    return PyPDFLoader(pdf_path).load()
+
+
 # 1. PDFの読み込みと分割
 print("PDFを解析中...")
-loader = PyPDFLoader("vaccine_manual.pdf") # PDFファイルを指定
-data = loader.load()
+data = _load_pdf_docs_best_effort("vaccine_manual.pdf")  # PDFファイルを指定
+for d in data:
+    d.page_content = _clean_pdf_text(getattr(d, "page_content", "") or "")
 
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-chunks = text_splitter.split_documents(data)
+text_splitter = _get_splitter()
+chunks = [c for c in text_splitter.split_documents(data) if (c.page_content or "").strip()]
 
 # 2. ベクトルデータベースの作成 (OllamaのEmbeddingモデルを使用)
 # 初回実行時に 'nomic-embed-text' モデルがダウンロードされます

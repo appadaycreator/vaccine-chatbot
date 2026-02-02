@@ -88,6 +88,59 @@ function loadApiBase() {
   return "http://localhost:8000";
 }
 
+const DIAG_UNSUPPORTED_KEY = "diagUnsupportedApiBases.v1";
+
+function loadDiagUnsupportedSet() {
+  try {
+    const raw = localStorage.getItem(DIAG_UNSUPPORTED_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return new Set();
+    const out = new Set();
+    for (const x of arr) {
+      const v = normalizeApiBase(String(x || ""));
+      if (v) out.add(v);
+    }
+    return out;
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDiagUnsupportedSet(set) {
+  try {
+    const arr = Array.from(set || []).map((x) => normalizeApiBase(String(x || ""))).filter(Boolean);
+    // いたずらに膨らまないよう上限
+    localStorage.setItem(DIAG_UNSUPPORTED_KEY, JSON.stringify(arr.slice(0, 50)));
+  } catch {
+    /* noop */
+  }
+}
+
+function markDiagUnsupported(apiBase) {
+  const v = normalizeApiBase(apiBase);
+  if (!v) return;
+  const set = loadDiagUnsupportedSet();
+  set.add(v);
+  saveDiagUnsupportedSet(set);
+}
+
+function unmarkDiagUnsupported(apiBase) {
+  const v = normalizeApiBase(apiBase);
+  if (!v) return;
+  const set = loadDiagUnsupportedSet();
+  if (!set.has(v)) return;
+  set.delete(v);
+  saveDiagUnsupportedSet(set);
+}
+
+function isDiagUnsupported(apiBase) {
+  const v = normalizeApiBase(apiBase);
+  if (!v) return false;
+  const set = loadDiagUnsupportedSet();
+  return set.has(v);
+}
+
 function renderMarkdown(md) {
   // marked があれば利用（なければプレーンテキスト）
   const markedLib = typeof window !== "undefined" ? window.marked : null;
@@ -694,6 +747,13 @@ function main() {
   let diagUnsupportedFor = null;
 
   apiBaseEl.value = loadApiBase();
+  // 前回 404 だったURLは、ページ再読み込み時の“1回目の404”すら出さない（静かなUX）
+  {
+    const apiBase = normalizeApiBase(apiBaseEl.value);
+    if (apiBase && isDiagUnsupported(apiBase)) {
+      diagUnsupportedFor = apiBase;
+    }
+  }
   // M2 Mac mini (8GB) では軽量モデルをデフォルトにする
   if (modelEl && !modelEl.value) {
     modelEl.value = "gemma2:2b";
@@ -701,6 +761,8 @@ function main() {
   saveBtn.addEventListener("click", () => {
     const v = normalizeApiBase(apiBaseEl.value);
     saveApiBase(v);
+    // “同じURLだがサーバーが更新された”ケースに備えて、保存時は一度だけ再判定できるよう解除
+    unmarkDiagUnsupported(v);
     diagUnsupportedFor = null;
     setStatus(`保存しました（APIのURL）: ${v}`);
     refreshSources();
@@ -926,6 +988,8 @@ function main() {
         ];
         diagErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
         diagUnsupportedFor = apiBase;
+        // 次回のページ再読み込みでも404を出さないように記録
+        markDiagUnsupported(apiBase);
         if (diagPollId) {
           clearInterval(diagPollId);
           diagPollId = null;
