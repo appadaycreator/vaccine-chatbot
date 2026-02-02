@@ -359,7 +359,7 @@ launchd を使う場合は、`~/Library/LaunchAgents/com.vaccine.api.plist` の 
 ```bash
 curl -X POST "http://localhost:8000/chat" \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"接種後に観察・記録すべき項目は？（資料にある範囲で）","model":"gemma2","k":2,"max_tokens":120,"timeout_s":240,"embedding_timeout_s":240,"search_timeout_s":120,"generate_timeout_s":240}'
+  -d '{"prompt":"（質問をここに入力。資料にある範囲で）","model":"gemma2","k":2,"max_tokens":120,"timeout_s":240,"embedding_timeout_s":240,"search_timeout_s":120,"generate_timeout_s":240}'
 ```
 
 `POST /search`（検索のみ）:
@@ -367,7 +367,7 @@ curl -X POST "http://localhost:8000/chat" \
 ```bash
 curl -X POST "http://localhost:8000/search" \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"接種後に観察・記録すべき項目は？（資料にある範囲で）","k":2,"embedding_timeout_s":240,"search_timeout_s":120}'
+  -d '{"prompt":"（質問をここに入力。資料にある範囲で）","k":2,"embedding_timeout_s":240,"search_timeout_s":120}'
 ```
 
 `POST /generate`（生成のみ。`/search` の `context` を渡す）:
@@ -375,7 +375,7 @@ curl -X POST "http://localhost:8000/search" \
 ```bash
 curl -X POST "http://localhost:8000/generate" \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"接種後に観察・記録すべき項目は？（資料にある範囲で）","model":"gemma2","max_tokens":120,"generate_timeout_s":240,"context":"..."}'
+  -d '{"prompt":"（質問をここに入力。資料にある範囲で）","model":"gemma2","max_tokens":120,"generate_timeout_s":240,"context":"..."}'
 ```
 
 ### ベクトルDB（`chroma_db`）について
