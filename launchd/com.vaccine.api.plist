@@ -46,11 +46,6 @@
         <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/pdfs</string>
         <key>CHROMA_PERSIST_DIR</key>
         <string>/Users/masayukitokunaga/workspace/vaccine-chatbot/chroma_db</string>
-
-        <!-- 既定のUX: 根拠（引用）が取れない場合も一般説明を返す -->
-        <!-- 古いUI（docs/）から叩く場合でも、未指定のときに効くようサーバー側既定をONにする -->
-        <key>ALLOW_GENERAL_FALLBACK_DEFAULT</key>
-        <string>1</string>
     </dict>
 </dict>
 </plist>

@@ -277,6 +277,11 @@ def _normalize_answer_text(answer: str, *, fallback_used: bool) -> str:
     # 旧セクション見出しを“会話文”として読めるように除去
     text2 = re.sub(r"^\s*(結論|根拠|相談先)\s*[:：]\s*", "", text2, flags=re.MULTILINE)
 
+    # モデルが一般論で埋めるのを抑止（「一般的には…」は要らない）
+    # - 1文/1行でも混ざるとノイズになるため、文単位・行単位で落とす
+    text2 = re.sub(r"一般的には[^。\n]*。", "", text2)
+    text2 = re.sub(r"^.*一般的には.*$", "", text2, flags=re.MULTILINE)
+
     if fallback_used:
         text2 = re.sub(r"\[P\d+\]", "", text2)
         text2 = text2.replace("【資料】", "【参考情報】")
@@ -305,6 +310,7 @@ def _build_answer_prompt(*, question: str, context: str) -> str:
 - 回答本文は、日本語で自然な会話文として簡潔に答える（固定フォーマット/見出しは出さない）
 - ページ番号や `[P12]` などのラベル、引用記号は回答本文に出さない（根拠表示はUI側で行う）
 - 【資料】の内容を超える一般論・注意喚起・追加の助言は書かない（資料にある範囲のみ）
+- 「一般的には」など、一般論を示す言い回しは使わない
 
 ルール:
 - 【資料】に書かれていない内容を断定しない（曖昧にそれっぽく言わない）

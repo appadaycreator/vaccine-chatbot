@@ -112,27 +112,6 @@ function loadModel() {
   }
 }
 
-const ALLOW_FALLBACK_KEY = "allowFallback.v1";
-
-function saveAllowFallback(v) {
-  try {
-    localStorage.setItem(ALLOW_FALLBACK_KEY, v ? "1" : "0");
-  } catch {
-    /* noop */
-  }
-}
-
-function loadAllowFallbackDefaultTrue() {
-  try {
-    const raw = localStorage.getItem(ALLOW_FALLBACK_KEY);
-    if (raw === null || raw === undefined || raw === "") return true; // 既定は“返す”（ユーザー体験優先）
-    const v = String(raw).trim();
-    return v === "1" || v.toLowerCase() === "true" || v.toLowerCase() === "yes" || v.toLowerCase() === "on";
-  } catch {
-    return true;
-  }
-}
-
 const DIAG_UNSUPPORTED_KEY = "diagUnsupportedApiBases.v1";
 
 function loadDiagUnsupportedSet() {
@@ -862,7 +841,6 @@ function main() {
   const apiBaseEl = $("apiBase");
   const modelEl = $("model");
   const kEl = $("k");
-  const allowFallbackEl = document.getElementById("allowFallback");
   const promptEl = $("prompt");
   const sendBtn = $("send");
   const resendBtn = $("resend");
@@ -912,8 +890,7 @@ function main() {
     if (!settingsSummaryEl) return;
     const m = (modelEl && modelEl.value ? String(modelEl.value) : "").trim();
     const k = (kEl && kEl.value ? String(kEl.value) : "").trim();
-    const fb = allowFallbackEl ? (allowFallbackEl.checked ? "一般回答: ON" : "一般回答: OFF") : "";
-    settingsSummaryEl.textContent = `モデル: ${m || "未選択"} / k=${k || "?"}${fb ? " / " + fb : ""}`;
+    settingsSummaryEl.textContent = `モデル: ${m || "未選択"} / k=${k || "?"}`;
   }
 
   // /diagnostics が未実装のAPI（またはAPI以外）を指すと 404 が定期的に出るため、
@@ -1030,22 +1007,12 @@ function main() {
       }
     }
   }
-  // “資料にない”が続くケースを避けるため、既定はON（localStorageがあればそれを優先）
-  if (allowFallbackEl) {
-    allowFallbackEl.checked = loadAllowFallbackDefaultTrue();
-  }
   updateSettingsSummary();
 
   // 入力中にも要約を更新して、いま何を設定しているかが分かるようにする
   apiBaseEl.addEventListener("input", () => updateApiBaseSummary());
   kEl.addEventListener("input", () => updateSettingsSummary());
   kEl.addEventListener("change", () => updateSettingsSummary());
-  if (allowFallbackEl) {
-    allowFallbackEl.addEventListener("change", () => {
-      saveAllowFallback(allowFallbackEl.checked);
-      updateSettingsSummary();
-    });
-  }
 
   saveBtn.addEventListener("click", () => {
     if (sameOriginUi) return;
@@ -1559,7 +1526,6 @@ function main() {
         }
       })();
     const k = Number(kEl.value || 3);
-    const allowFallback = allowFallbackEl ? !!allowFallbackEl.checked : true;
     const p = String(prompt || "").trim();
     if (!sameOriginUi && !apiBase) {
       addMessage("error", "APIのURLを入力してください。", {
@@ -1607,7 +1573,6 @@ function main() {
           embedding_timeout_s: 240,
           search_timeout_s: 120,
           generate_timeout_s: 240,
-          allow_general_fallback: allowFallback,
         },
         { signal: currentController.signal }
       );
