@@ -13,6 +13,9 @@
       <div class="header__title">
         <h1>vaccine-chatbot</h1>
         <p class="muted">GitHub Pages から API（FastAPI）を叩く簡易チャットUI</p>
+        <p class="muted small">
+          免責: 診断ではありません。緊急性が疑われる場合は <strong>119（救急）</strong> を利用してください。
+        </p>
       </div>
       <div class="header__links">
         <a href="./" aria-label="ページを再読み込み">再読み込み</a>
@@ -21,89 +24,6 @@
     </header>
 
     <main class="main" id="main">
-      <section class="card">
-        <h2>接続先</h2>
-        <div class="row">
-          <label for="apiBase">APIのURL</label>
-          <input
-            id="apiBase"
-            type="url"
-            placeholder="https://xxxx.trycloudflare.com"
-            autocomplete="off"
-            spellcheck="false"
-            aria-describedby="apiBaseHelp"
-          />
-          <button id="saveApiBase" class="btn btn--secondary" type="button">保存</button>
-        </div>
-        <p class="muted" id="apiBaseHelp">
-          GitHub Pages（HTTPS）からは <code>http://localhost:8000</code> へ直接アクセスできません（混在コンテンツ）。<br />
-          <code>cloudflared tunnel --url http://localhost:8000</code> で発行される HTTPS URL を指定してください。
-        </p>
-      </section>
-
-      <section class="card">
-        <h2>免責（診断ではありません）</h2>
-        <p class="muted">
-          本ツールは、参照PDF（厚労省等の資料）の内容に基づく情報提供を目的としており、診断や治療の代替ではありません。<br />
-          体調が悪い・不安が強い場合は、接種を受けた医療機関またはお住まいの自治体の予防接種相談窓口に相談してください。<br />
-          呼吸が苦しい、意識がもうろう、症状が急に悪化した等の緊急性が疑われる場合は <strong>119（救急）</strong> を利用してください。
-        </p>
-      </section>
-
-      <section class="card">
-        <h2>設定</h2>
-        <div class="row row--wrap">
-          <div class="field">
-            <label for="model">モデル</label>
-            <select id="model">
-              <option value="gemma2:2b" selected>gemma2:2b（推奨）</option>
-              <option value="gemma2">gemma2</option>
-              <option value="llama3.1">llama3.1</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="k">検索件数（k）</label>
-            <input id="k" type="number" min="1" max="20" step="1" value="3" aria-describedby="kHelp" />
-            <div class="muted small" id="kHelp">
-              数字が大きいほど、より多くの資料を候補として探します（遅くなる場合があります）。
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="diag-header">
-          <h2>環境チェック</h2>
-          <span id="diagOverall" class="pill pill--yellow">未確認</span>
-        </div>
-        <p class="muted">
-          Ollamaが未起動・モデル未ダウンロードなど、<strong>「なぜ動かないか」</strong>を表示します（APIの <code>/diagnostics</code> を参照）。
-        </p>
-        <div class="muted small" id="diagSummary"></div>
-        <div class="muted small error" id="diagError"></div>
-        <ul class="diag-list" id="diagList"></ul>
-      </section>
-
-      <section class="card">
-        <h2>参照ソース（PDF一覧）</h2>
-        <p class="muted">
-          APIサーバー側で <code>PDF_DIR</code>（既定: <code>./pdfs</code>）に置かれたPDFを参照します。
-          反映が必要な場合はAPIの <code>/reload</code> で索引（検索の準備）を作り直せます。
-        </p>
-        <div class="row">
-          <label for="reloadIndex">資料の更新を反映</label>
-          <div class="muted small">
-            PDFを追加・更新したあとに反映が遅い場合は、ここから索引（検索の準備）を作り直して反映できます。
-          </div>
-          <button id="reloadIndex" class="btn btn--secondary" type="button">反映する</button>
-        </div>
-        <div class="muted small" id="sourcesStatus"></div>
-        <div class="muted small" id="sourcesIndexing"></div>
-        <div class="muted small error" id="sourcesError"></div>
-        <div class="muted small" id="sourcesNextActions"></div>
-        <div class="muted small" id="sourcesList"></div>
-      </section>
-
       <section class="card card--chat">
         <h2>チャット</h2>
         <div class="quick" id="quickQuestions" aria-label="例（よくある質問）"></div>
@@ -128,6 +48,129 @@
           ヒント: URLに <code>?api=...</code> を付けても設定できます（例:
           <code>?api=https%3A%2F%2Fxxxx.trycloudflare.com</code>）
         </div>
+      </section>
+
+      <section class="card">
+        <details id="connectAccordion" class="accordion">
+          <summary class="accordion__summary">
+            <span class="accordion__title">接続先（APIのURL）</span>
+            <span class="accordion__meta muted small" id="apiBaseSummary">未設定</span>
+          </summary>
+          <div class="accordion__body">
+            <p class="muted small">
+              <strong>推奨</strong>: 迷わず使える導線として、FastAPI がこのUI（<code>docs/</code>）を <code>/ui</code> 配下で配信します。<br />
+              <code>/ui</code> で開いた場合は「APIのURL入力」は不要で、同一オリジンの <code>/chat</code> 等を呼びます。<br />
+              ローカル例:
+              <a href="http://127.0.0.1:8000/ui/" rel="noopener noreferrer">http://127.0.0.1:8000/ui/</a>
+              （このページがAPI配下で配信されている場合のみ有効）:
+              <a href="/ui/" rel="noopener noreferrer">/ui/</a>
+            </p>
+            <div class="row">
+              <label for="apiBase">APIのURL</label>
+              <input
+                id="apiBase"
+                type="url"
+                placeholder="https://xxxx.trycloudflare.com"
+                autocomplete="off"
+                spellcheck="false"
+                aria-describedby="apiBaseHelp"
+              />
+              <button id="saveApiBase" class="btn btn--secondary" type="button">保存</button>
+            </div>
+            <p class="muted" id="apiBaseHelp">
+              GitHub Pages（HTTPS）からは <code>http://localhost:8000</code> へ直接アクセスできません（混在コンテンツ）。<br />
+              <code>cloudflared tunnel --url http://localhost:8000</code> で発行される HTTPS URL を指定してください。
+            </p>
+          </div>
+        </details>
+      </section>
+
+      <section class="card">
+        <details class="accordion">
+          <summary class="accordion__summary">
+            <span class="accordion__title">設定（モデル / 検索件数）</span>
+            <span class="accordion__meta muted small" id="settingsSummary">モデル: 未選択 / k=3</span>
+          </summary>
+          <div class="accordion__body">
+            <div class="row row--wrap">
+              <div class="field">
+                <label for="model">モデル</label>
+                <select id="model">
+                  <option value="" selected>（環境チェックでインストール済みモデルを自動反映）</option>
+                </select>
+                <div class="muted small">※ APIの <code>/diagnostics</code> から取得した「インストール済みモデル」を候補として表示します。</div>
+              </div>
+              <div class="field">
+                <label for="k">検索件数（k）</label>
+                <input id="k" type="number" min="1" max="20" step="1" value="3" aria-describedby="kHelp" />
+                <div class="muted small" id="kHelp">
+                  数字が大きいほど、より多くの資料を候補として探します（遅くなる場合があります）。
+                </div>
+              </div>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section class="card">
+        <details class="accordion">
+          <summary class="accordion__summary">
+            <span class="accordion__title">環境チェック</span>
+            <span class="accordion__meta">
+              <span id="diagOverall" class="pill pill--yellow">未確認</span>
+            </span>
+          </summary>
+          <div class="accordion__body">
+            <p class="muted">
+              Ollamaが未起動・モデル未ダウンロードなど、<strong>「なぜ動かないか」</strong>を表示します（APIの <code>/diagnostics</code> を参照）。
+            </p>
+            <div class="muted small" id="diagSummary"></div>
+            <div class="muted small error" id="diagError"></div>
+            <ul class="diag-list" id="diagList"></ul>
+          </div>
+        </details>
+      </section>
+
+      <section class="card">
+        <details class="accordion">
+          <summary class="accordion__summary">
+            <span class="accordion__title">参照ソース（PDF一覧）</span>
+            <span class="accordion__meta muted small" id="sourcesStatus"></span>
+          </summary>
+          <div class="accordion__body">
+            <p class="muted">
+              APIサーバー側で <code>PDF_DIR</code>（既定: <code>./pdfs</code>）に置かれたPDFを参照します。
+              反映が必要な場合はAPIの <code>/reload</code> で索引（検索の準備）を作り直せます。
+            </p>
+            <div class="row">
+              <label for="reloadIndex">資料の更新を反映</label>
+              <div class="muted small">
+                PDFを追加・更新したあとに反映が遅い場合は、ここから索引（検索の準備）を作り直して反映できます。
+              </div>
+              <button id="reloadIndex" class="btn btn--secondary" type="button">反映する</button>
+            </div>
+            <div class="muted small" id="sourcesIndexing"></div>
+            <div class="muted small error" id="sourcesError"></div>
+            <div class="muted small" id="sourcesNextActions"></div>
+            <div class="muted small" id="sourcesList"></div>
+          </div>
+        </details>
+      </section>
+
+      <section class="card">
+        <details class="accordion">
+          <summary class="accordion__summary">
+            <span class="accordion__title">免責（診断ではありません）</span>
+            <span class="accordion__meta muted small">クリックで全文を表示</span>
+          </summary>
+          <div class="accordion__body">
+            <p class="muted">
+              本ツールは、参照PDF（厚労省等の資料）の内容に基づく情報提供を目的としており、診断や治療の代替ではありません。<br />
+              体調が悪い・不安が強い場合は、接種を受けた医療機関またはお住まいの自治体の予防接種相談窓口に相談してください。<br />
+              呼吸が苦しい、意識がもうろう、症状が急に悪化した等の緊急性が疑われる場合は <strong>119（救急）</strong> を利用してください。
+            </p>
+          </div>
+        </details>
       </section>
     </main>
 

@@ -25,7 +25,7 @@ with st.sidebar:
     st.header("設定")
     llm_model = st.selectbox("回答モデル", ["gemma2", "llama3.1"], index=0)
     k = st.slider("検索の強さ（k値）", min_value=1, max_value=10, value=3, step=1)
-    st.caption("埋め込みモデル: `nomic-embed-text`（固定）")
+    st.caption("埋め込みモデル: `nomic-embed-text`（固定 / 未導入なら `ollama pull nomic-embed-text`）")
     st.caption("PDFはサーバー側で `./pdfs/`（環境変数 `PDF_DIR`）に配置して利用します。")
     st.divider()
     st.caption("操作ヒント: 「例」ボタンで質問を自動送信 / 「再送」で最後の質問をもう一度送れます。")
@@ -209,6 +209,51 @@ def _make_excerpt(text: str, max_lines: int = 10, max_chars: int = 900) -> str:
     return "\n".join(out).strip()
 
 
+def _model_names_from_ollama_list(payload) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return []
+    out: list[str] = []
+    for m in models:
+        if isinstance(m, dict) and isinstance(m.get("name"), str):
+            out.append(m["name"])
+    return out
+
+
+def _has_model(model_names: list[str], wanted: str) -> bool:
+    w = (wanted or "").strip()
+    if not w:
+        return False
+    return any(n == w or n.startswith(w + ":") for n in model_names)
+
+
+def _ensure_embedding_model(model: str = "nomic-embed-text") -> None:
+    try:
+        info = ollama.list()
+    except Exception as e:
+        raise RuntimeError(
+            "Ollama に接続できません（未起動の可能性）。\n"
+            "対処:\n"
+            "- Ollama が起動しているか確認してください（例: brew services start ollama）"
+        ) from e
+    names = _model_names_from_ollama_list(info)
+    if not _has_model(names, model):
+        raise RuntimeError(
+            f"Embeddingモデル（{model}）が見つかりません。\n"
+            "対処:\n"
+            f"- ollama pull {model}\n"
+            "- RAG（PDF検索）は embedding モデルが無いと動きません"
+        )
+
+
+def _is_embedding_model_missing_error(e: Exception, model: str = "nomic-embed-text") -> bool:
+    msg = str(e)
+    low = msg.lower()
+    return model in msg and ("見つかりません" in msg or "not found" in low or "model not found" in low)
+
+
 @st.cache_resource(show_spinner=False)
 def _build_vectorstore_from_paths(paths: list[str], signature: str):
     # signature はキャッシュキー安定化のため
@@ -223,6 +268,7 @@ def _build_vectorstore_from_paths(paths: list[str], signature: str):
             d.page_content = _clean_pdf_text(getattr(d, "page_content", "") or "")
         _strip_repeated_header_footer(docs)
         chunks.extend([c for c in splitter.split_documents(docs) if (c.page_content or "").strip()])
+    _ensure_embedding_model("nomic-embed-text")
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
     return Chroma.from_documents(documents=chunks, embedding=embeddings)
 
@@ -272,7 +318,15 @@ try:
         vectorstore = _build_vectorstore_from_paths(paths, sig)
     st.success(f"資料の読み込みが完了しました（{len(paths)}件）。")
 except Exception as e:
-    st.error(f"PDFを読み込めませんでした: {e}")
+    if _is_embedding_model_missing_error(e, "nomic-embed-text"):
+        st.error(
+            "Embeddingモデル（nomic-embed-text）が見つかりません。\n\n"
+            "対処:\n"
+            "- ollama pull nomic-embed-text\n"
+            "- RAG（PDF検索）は embedding モデルが無いと動きません"
+        )
+    else:
+        st.error(f"知識ベースを構築できませんでした: {e}")
     st.stop()
 
 # リセットボタン

@@ -125,6 +125,46 @@ code {
   font-size: 1.05rem;
 }
 
+.accordion {
+  width: 100%;
+}
+
+.accordion__summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 2px;
+}
+
+.accordion__summary::-webkit-details-marker {
+  display: none;
+}
+
+.accordion__title {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.accordion__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: flex-end;
+  text-align: right;
+}
+
+details.accordion[open] .accordion__summary {
+  padding-bottom: 10px;
+}
+
+.accordion__body {
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
 .row {
   display: grid;
   grid-template-columns: 130px 1fr auto;

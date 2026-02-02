@@ -58,6 +58,12 @@ ollama pull llama3.1
 ollama pull nomic-embed-text
 ```
 
+補足:
+
+- **RAG（PDF検索）には embedding モデル（`nomic-embed-text`）が必須**です。未導入だと環境チェックで **「赤: 要対応」** になり、検索できません。
+- 対処:
+  - `ollama pull nomic-embed-text`
+
 ## 使い方（CLI）
 
 ### シンプル版（固定の知識ベース）
@@ -88,6 +94,11 @@ streamlit run app_web.py
 - **エラー表示**: 画面上に要点を表示し、ログ全文は展開して確認できます
 
 ## 使い方（API / FastAPI）
+
+### 推奨: 1つのURLで完結（API配下の <code>/ui</code>）
+
+FastAPI が静的UI（`docs/`）を配信するため、**`http://127.0.0.1:8000/ui/` を開くだけで**チャットまで到達できます。  
+この導線では **同一オリジン**で `POST /chat` 等を呼ぶため、Mixed Content や「APIのURL貼り替え」が不要です。
 
 ### 起動
 
@@ -135,7 +146,8 @@ curl -sS http://127.0.0.1:8000/status | python -m json.tool
 
 ### 静的チャットUI（docs/）の操作（最低限のUX）
 
-- **主要操作はキーボードだけで完結**: スキップリンク（「チャット入力へ移動」）とフォーカス可視化（Tab移動）を実装
+- **ファーストビュー最適化**: チャットを最上部に配置し、接続先/設定/環境チェック/参照ソース/免責はアコーディオンで折りたたみます（API未設定時は「接続先」を自動で開きます）
+- **主要操作はキーボードだけで完結**: スキップリンク（「チャット入力へ移動」）で入力欄へスクロールし、**入力欄へフォーカス**も当てます（モバイルでも入力開始しやすい）。フォーカス可視化（Tab移動）も実装
 - **送信中は多重実行しない**: 送信ボタンを無効化（入力欄は送信中のみ読み取り専用、キャンセル可能）
 - **処理段階の表示**: `/chat` の処理を **埋め込み → 検索 → 生成** の段階に分けて「いま何をしているか」を表示します（目安。直近の処理時間（内訳）をもとに推定）
 - **タイムアウト後の自己解決**: 失敗時は `detail.stage` を見て **次に試すこと**（例: `k` を下げる／軽量モデルへ切替）をボタンで提示します
@@ -305,7 +317,7 @@ curl -sS http://127.0.0.1:8000/status
 ```bash
 curl -X POST "http://localhost:8000/chat" \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"接種後7日間に記録する項目は？","model":"gemma2:2b","k":2,"max_tokens":120,"timeout_s":240,"embedding_timeout_s":240,"search_timeout_s":120,"generate_timeout_s":240}'
+  -d '{"prompt":"接種後7日間に記録する項目は？","model":"gemma2","k":2,"max_tokens":120,"timeout_s":240,"embedding_timeout_s":240,"search_timeout_s":120,"generate_timeout_s":240}'
 ```
 
 `POST /search`（検索のみ）:
@@ -321,7 +333,7 @@ curl -X POST "http://localhost:8000/search" \
 ```bash
 curl -X POST "http://localhost:8000/generate" \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"接種後7日間に記録する項目は？","model":"gemma2:2b","max_tokens":120,"generate_timeout_s":240,"context":"..."}'
+  -d '{"prompt":"接種後7日間に記録する項目は？","model":"gemma2","max_tokens":120,"generate_timeout_s":240,"context":"..."}'
 ```
 
 ### ベクトルDB（`chroma_db`）について
@@ -390,7 +402,7 @@ export CHUNK_OVERLAP=120
 GitHub Pages の画面にある **「環境チェック」**（APIの `GET /diagnostics`）で、次を診断できます。
 
 - **Ollama疎通**: Ollama が起動していない/到達できない
-- **生成モデルの有無**: 選択中モデルが未インストール（例: `ollama pull gemma2:2b`）
+- **生成モデルの有無**: 選択中モデルが未インストール（例: `ollama pull gemma2`）
 - **Embeddingモデルの有無/動作**: `nomic-embed-text` が未インストール、または embedding が失敗している（RAGが動かない）
 - **生成の動作**: 生成がタイムアウト/失敗している（初回起動・高負荷・モデル不備など）
 

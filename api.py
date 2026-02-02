@@ -19,6 +19,8 @@ import ollama
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import RedirectResponse
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -31,6 +33,8 @@ DEFAULT_PDF_DIR = "./pdfs"  # ここにPDFを置くと自動で参照（推奨�
 LEGACY_PDF_DIR = "./uploads"  # 互換: 旧アップロード先を参照対象としても見る（アップロード機能ではない）
 DEFAULT_PERSIST_DIR = "./chroma_db"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
+# 生成モデル（回答モデル）の既定。環境差が大きいので、必要なら環境変数で上書きする。
+DEFAULT_LLM_MODEL = os.environ.get("DEFAULT_LLM_MODEL", "gemma2")
 MAX_CONTEXT_CHARS = 5000
 MAX_DOC_CHARS = 1400
 INDEX_MANIFEST_NAME = "source_index.json"
@@ -192,6 +196,23 @@ APP_STARTED_AT = datetime.now(tz=timezone.utc).isoformat()
 
 app = FastAPI(title="vaccine-chatbot API", version="0.2.0")
 
+# UI（docs/）をAPI配下で配信（推奨導線: /ui）
+# 注: ここは import 時に評価されるので、未定義の関数（_repo_root 等）を参照しない
+_ui_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs")
+if os.path.isdir(_ui_dir):
+
+    @app.get("/ui", include_in_schema=False)
+    def _ui_redirect():
+        # 相対パス（./app.js 等）が壊れないよう末尾スラッシュへ寄せる
+        return RedirectResponse(url="/ui/", status_code=307)
+
+    app.mount("/ui", StaticFiles(directory=_ui_dir, html=True), name="ui")
+else:
+    logger.warning(
+        "ui_dir_missing",
+        extra={"event": "ui_dir_missing", "stage": "startup", "code": "UI_DIR_MISSING", "extra": {"path": _ui_dir}},
+    )
+
 # GitHub Pages（外部）からのアクセスを許可する設定
 app.add_middleware(
     CORSMiddleware,
@@ -318,7 +339,7 @@ async def _observability_unhandled_exception_handler(request: Request, exc: Exce
 
 class ChatRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
-    model: str = Field(default="gemma2:2b", min_length=1, max_length=100)
+    model: str = Field(default=DEFAULT_LLM_MODEL, min_length=1, max_length=100)
     k: int = Field(default=3, ge=1, le=20)
     max_tokens: int = Field(default=256, ge=32, le=1024)
     timeout_s: int = Field(default=180, ge=10, le=600)
@@ -337,7 +358,7 @@ class SearchRequest(BaseModel):
 
 class GenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
-    model: str = Field(default="gemma2:2b", min_length=1, max_length=100)
+    model: str = Field(default=DEFAULT_LLM_MODEL, min_length=1, max_length=100)
     max_tokens: int = Field(default=256, ge=32, le=2048)
     timeout_s: int = Field(default=180, ge=5, le=900)  # 互換（まとめて指定）
     generate_timeout_s: Optional[int] = Field(default=None, ge=1, le=900)
@@ -938,6 +959,22 @@ def _rebuild_vectorstore(paths: list[str], persist_dir: str) -> tuple[Chroma, di
             report,
         )
 
+    # embedding モデルが無いと RAG は構築できない（ここで明示的にエラーにする）
+    # 失敗しても既存DBを消さないよう、persist_dir を触る前にチェックする。
+    try:
+        timeout_s = float(os.environ.get("INDEX_MODEL_CHECK_TIMEOUT_S", "3.0"))
+        model_names = _ollama_cli_list_models(timeout_s=timeout_s)
+        if not _has_model(model_names, DEFAULT_EMBED_MODEL):
+            raise IndexBuildError(f"Embeddingモデル（{DEFAULT_EMBED_MODEL}）が見つかりません。", report)
+    except IndexBuildError:
+        raise
+    except FileNotFoundError:
+        raise IndexBuildError("Ollama（ollama コマンド）が見つかりません。", report)
+    except subprocess.TimeoutExpired:
+        raise IndexBuildError("Ollama のモデル一覧取得（ollama list）がタイムアウトしました。", report)
+    except Exception as e:
+        raise IndexBuildError(f"Embeddingモデルの準備確認に失敗しました: {e}", report)
+
     # 既存DBがある場合も、ソースが変わったら作り直す（重複/ゴミ混入を避ける）
     _safe_reset_persist_dir(persist_dir)
     embeddings = OllamaEmbeddings(model=DEFAULT_EMBED_MODEL)
@@ -1050,6 +1087,25 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
         # 失敗時は、既存の vectorstore / signature をなるべく維持する（途中で消していない想定）
         app.state.init_error = str(e)
         report = e.report if isinstance(e, IndexBuildError) else None
+        # 失敗理由に応じて「次にやること」を出し分け（PDF問題と Ollama/モデル不足を分離）
+        err_code = "INDEX_BUILD_FAILED"
+        err_hints: list[str] = [
+            "PDFを ./pdfs/（環境変数 PDF_DIR）に配置してください",
+            "スキャンPDFの場合はOCRしてから配置してください",
+            "PDFを追加・更新したら POST /reload で再インデックスしてください",
+        ]
+        if _is_ollama_down_error(e):
+            err_code = "OLLAMA_UNAVAILABLE"
+            err_hints = [
+                "Ollama が起動しているか確認してください",
+                f"Embeddingモデルが存在するか確認してください（ollama pull {DEFAULT_EMBED_MODEL}）",
+            ]
+        elif _is_model_not_found_error(e, DEFAULT_EMBED_MODEL):
+            err_code = "EMBEDDING_MODEL_NOT_FOUND"
+            err_hints = [
+                f"ollama pull {DEFAULT_EMBED_MODEL}",
+                "RAG（PDF検索）は embedding モデルが無いと動きません",
+            ]
         _update_index_status(
             {
                 "running": False,
@@ -1057,12 +1113,8 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
                 "last_report": report,
                 "last_error": {
                     "message": str(e),
-                    "code": "INDEX_BUILD_FAILED",
-                    "hints": [
-                        "PDFを ./pdfs/（環境変数 PDF_DIR）に配置してください",
-                        "スキャンPDFの場合はOCRしてから配置してください",
-                        "PDFを追加・更新したら POST /reload で再インデックスしてください",
-                    ],
+                    "code": err_code,
+                    "hints": err_hints,
                     "at": _utc_now_iso(),
                     "report": report,
                 },
@@ -1084,7 +1136,7 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
                 extra={
                     "event": "index_failed",
                     "stage": "index",
-                    "code": "INDEX_BUILD_FAILED",
+                    "code": err_code,
                     "timings": {"index_ms": int((time.perf_counter() - t0) * 1000)},
                     "extra": {"run_id": run_id, "trigger": trigger, "error": str(e), "report": report},
                 },
@@ -1455,6 +1507,49 @@ def _is_ollama_down_error(e: Exception) -> bool:
     )
 
 
+def _is_model_not_found_error(e: Exception, model: str) -> bool:
+    """
+    Ollama 側にモデルが存在しない（pull が必要）ケースを雑に検出する。
+    例: "model 'nomic-embed-text' not found" 等
+    """
+    wanted = (model or "").strip()
+    if not wanted:
+        return False
+    msg = str(e)
+    low = msg.lower()
+    if wanted.lower() not in low and f"（{wanted}）" not in msg:
+        return False
+    return any(s in low for s in ["not found", "model not found", "no such file", "missing"]) or "見つかりません" in msg
+
+
+def _ollama_cli_list_models(timeout_s: float = 3.0) -> list[str]:
+    """
+    `ollama list` の出力をモデル名配列にする（タイムアウト制御のため CLI を使用）。
+    出力形式の揺れに備えて、先頭カラム（NAME）だけを拾う。
+    """
+    if shutil.which("ollama") is None:
+        raise FileNotFoundError("ollama command not found")
+    proc = subprocess.run(
+        ["ollama", "list"],
+        capture_output=True,
+        text=True,
+        timeout=float(timeout_s),
+        check=False,
+    )
+    out = (proc.stdout or "").splitlines()
+    names: list[str] = []
+    for ln in out:
+        t = (ln or "").strip()
+        if not t:
+            continue
+        if t.upper().startswith("NAME"):
+            continue
+        name = t.split()[0].strip()
+        if name:
+            names.append(name)
+    return names
+
+
 async def _embed_query_with_cache(prompt: str, timeout_s: int) -> tuple[list[float], dict[str, Any]]:
     cache: _LRUCache = app.state.embedding_cache
     key = prompt.strip()
@@ -1572,6 +1667,16 @@ async def _run_search(prompt: str, k: int, embedding_timeout_s: int, search_time
         )
     except Exception as e:
         timings["embedding_ms"] = int((time.perf_counter() - t_embed0) * 1000)
+        if _is_model_not_found_error(e, DEFAULT_EMBED_MODEL):
+            _http_error(
+                stage="embedding",
+                code="EMBEDDING_MODEL_NOT_FOUND",
+                message=f"Embeddingモデル（{DEFAULT_EMBED_MODEL}）が見つかりません。",
+                hints=[f"ollama pull {DEFAULT_EMBED_MODEL}", "RAG（PDF検索）は embedding モデルが無いと動きません"],
+                timings=timings,
+                extra={"error": str(e)},
+                status_code=503,
+            )
         if _is_ollama_down_error(e):
             _http_error(
                 stage="embedding",
@@ -1847,7 +1952,7 @@ async def diagnostics(model: str | None = None) -> dict[str, Any]:
     - モデルの有無（生成/embedding）
     - embedding の簡易スモークテスト
     """
-    requested_model = (model or "gemma2:2b").strip() or "gemma2:2b"
+    requested_model = (model or DEFAULT_LLM_MODEL).strip() or DEFAULT_LLM_MODEL
     embed_model = DEFAULT_EMBED_MODEL
 
     checks: list[dict[str, Any]] = []

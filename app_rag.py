@@ -11,6 +11,45 @@ def _normalize_newlines(text: str) -> str:
     return (text or "").replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _model_names_from_ollama_list(payload) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return []
+    out: list[str] = []
+    for m in models:
+        if isinstance(m, dict) and isinstance(m.get("name"), str):
+            out.append(m["name"])
+    return out
+
+
+def _has_model(model_names: list[str], wanted: str) -> bool:
+    w = (wanted or "").strip()
+    if not w:
+        return False
+    return any(n == w or n.startswith(w + ":") for n in model_names)
+
+
+def _ensure_embedding_model(model: str = "nomic-embed-text") -> None:
+    try:
+        info = ollama.list()
+    except Exception as e:
+        raise RuntimeError(
+            "Ollama に接続できません（未起動の可能性）。\n"
+            "対処:\n"
+            "- Ollama が起動しているか確認してください（例: brew services start ollama）"
+        ) from e
+    names = _model_names_from_ollama_list(info)
+    if not _has_model(names, model):
+        raise RuntimeError(
+            f"Embeddingモデル（{model}）が見つかりません。\n"
+            "対処:\n"
+            f"- ollama pull {model}\n"
+            "- RAG（PDF検索）は embedding モデルが無いと動きません"
+        )
+
+
 def _clean_pdf_text(text: str) -> str:
     t = _normalize_newlines(text)
     t = re.sub(r"[ \t]+\n", "\n", t)
@@ -68,8 +107,9 @@ text_splitter = _get_splitter()
 chunks = [c for c in text_splitter.split_documents(data) if (c.page_content or "").strip()]
 
 # 2. ベクトルデータベースの作成 (OllamaのEmbeddingモデルを使用)
-# 初回実行時に 'nomic-embed-text' モデルがダウンロードされます
+# 注意: embedding モデルは自動ダウンロードされません。事前に `ollama pull nomic-embed-text` が必要です。
 print("知識ベースを構築中（これには数分かかる場合があります）...")
+_ensure_embedding_model("nomic-embed-text")
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 vectorstore = Chroma.from_documents(documents=chunks, embedding=embeddings)
 

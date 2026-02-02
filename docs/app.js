@@ -68,6 +68,12 @@ function normalizeApiBase(input) {
   return v;
 }
 
+function isSameOriginUi() {
+  // FastAPI が docs/ を /ui 配下で配信する導線（同一オリジンで /chat 等を叩ける）
+  const p = (typeof window !== "undefined" && window.location && window.location.pathname) || "";
+  return p === "/ui" || p.startsWith("/ui/");
+}
+
 function saveApiBase(v) {
   localStorage.setItem("apiBase", v);
 }
@@ -86,6 +92,24 @@ function loadApiBase() {
   const isLocalHost = host === "localhost" || host === "127.0.0.1";
   if (protocol === "https:" && !isLocalHost) return "";
   return "http://localhost:8000";
+}
+
+const MODEL_KEY = "model.v1";
+
+function saveModel(v) {
+  try {
+    localStorage.setItem(MODEL_KEY, String(v || "").trim());
+  } catch {
+    /* noop */
+  }
+}
+
+function loadModel() {
+  try {
+    return String(localStorage.getItem(MODEL_KEY) || "").trim();
+  } catch {
+    return "";
+  }
 }
 
 const DIAG_UNSUPPORTED_KEY = "diagUnsupportedApiBases.v1";
@@ -175,6 +199,39 @@ function truncateText(s, maxLen = 80) {
   if (!t) return "";
   if (t.length <= maxLen) return t;
   return t.slice(0, Math.max(0, maxLen - 1)) + "…";
+}
+
+function uniqPreserve(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const x of Array.isArray(arr) ? arr : []) {
+    const v = String(x || "").trim();
+    if (!v) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}
+
+function resolveWantedToInstalled(modelNames, wanted) {
+  const names = Array.isArray(modelNames) ? modelNames : [];
+  const w = String(wanted || "").trim();
+  if (!w) return "";
+  // 例: wanted=gemma2 でも installed に gemma2:latest しか無い場合がある
+  const exact = names.find((n) => String(n) === w);
+  if (exact) return String(exact);
+  const prefix = names.find((n) => String(n).startsWith(w + ":"));
+  return prefix ? String(prefix) : "";
+}
+
+function isLikelyEmbeddingModel(name, embedModel) {
+  const n = String(name || "");
+  const lower = n.toLowerCase();
+  const em = String(embedModel || "").trim();
+  if (em && (n === em || n.startsWith(em + ":"))) return true;
+  // “embed” を含むモデル名は埋め込み専用のことが多い（完全一致ではないが誤選択を避けたい）
+  return lower.includes("embed") || lower.includes("embedding");
 }
 
 async function copyToClipboard(text) {
@@ -741,26 +798,156 @@ function main() {
   const diagErrorEl = $("diagError");
   const diagListEl = $("diagList");
 
+  const sameOriginUi = isSameOriginUi();
+  if (sameOriginUi) {
+    // /ui では「GitHub Pages 前提」の文言が混乱しやすいので、表示を寄せる
+    try {
+      document.title = "vaccine-chatbot（/ui）";
+    } catch {
+      /* noop */
+    }
+    try {
+      const subtitle = document.querySelector(".header__title p.muted");
+      if (subtitle) subtitle.textContent = "API配下のチャットUI（/ui）";
+    } catch {
+      /* noop */
+    }
+  }
+
+  // ファーストビュー改善（アコーディオン要約）
+  const connectAccordionEl = document.getElementById("connectAccordion");
+  const apiBaseSummaryEl = document.getElementById("apiBaseSummary");
+  const settingsSummaryEl = document.getElementById("settingsSummary");
+
+  function updateApiBaseSummary() {
+    if (!apiBaseSummaryEl) return;
+    const v = sameOriginUi ? "" : normalizeApiBase(apiBaseEl.value);
+    apiBaseSummaryEl.textContent = v ? truncateText(v, 44) : "未設定";
+  }
+
+  function updateSettingsSummary() {
+    if (!settingsSummaryEl) return;
+    const m = (modelEl && modelEl.value ? String(modelEl.value) : "").trim();
+    const k = (kEl && kEl.value ? String(kEl.value) : "").trim();
+    settingsSummaryEl.textContent = `モデル: ${m || "未選択"} / k=${k || "?"}`;
+  }
+
   // /diagnostics が未実装のAPI（またはAPI以外）を指すと 404 が定期的に出るため、
   // 一度 404 を検出したらポーリングを止め、ユーザーが APIのURL を見直せるようにする。
   let diagPollId = null;
   let diagUnsupportedFor = null;
+  let lastModelOptionsKey = "";
 
-  apiBaseEl.value = loadApiBase();
-  // 前回 404 だったURLは、ページ再読み込み時の“1回目の404”すら出さない（静かなUX）
-  {
-    const apiBase = normalizeApiBase(apiBaseEl.value);
-    if (apiBase && isDiagUnsupported(apiBase)) {
-      diagUnsupportedFor = apiBase;
+  // スキップリンク（「チャット入力へ移動」）: 画面スクロールだけでなく入力欄へフォーカスも当てる。
+  // 特にモバイルでは “スクロールだけ” だとキーボードが出ない/入力開始できないことがある。
+  function focusPrompt({ smooth = true } = {}) {
+    // focus({preventScroll}) が使える環境ではスクロールを制御しやすい
+    try {
+      promptEl.focus({ preventScroll: true });
+    } catch {
+      try {
+        promptEl.focus();
+      } catch {
+        /* noop */
+      }
+    }
+    try {
+      promptEl.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "center" });
+    } catch {
+      try {
+        promptEl.scrollIntoView();
+      } catch {
+        /* noop */
+      }
     }
   }
-  // M2 Mac mini (8GB) では軽量モデルをデフォルトにする
-  if (modelEl && !modelEl.value) {
-    modelEl.value = "gemma2:2b";
+
+  const skipToPrompt = document.querySelector('a.skip-link[href="#prompt"]');
+  if (skipToPrompt) {
+    skipToPrompt.addEventListener("click", (e) => {
+      // “#promptへ移動”を保ちつつ、確実に入力できる状態にする
+      e.preventDefault();
+      focusPrompt({ smooth: true });
+      try {
+        history.replaceState(null, "", "#prompt");
+      } catch {
+        /* noop */
+      }
+    });
   }
+  // URLが最初から #prompt の場合も、入力欄へ寄せる（ただしキーボード表示はブラウザ仕様次第）
+  if (typeof window !== "undefined" && window.location && window.location.hash === "#prompt") {
+    setTimeout(() => focusPrompt({ smooth: false }), 0);
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener("hashchange", () => {
+      if (window.location && window.location.hash === "#prompt") {
+        focusPrompt({ smooth: true });
+      }
+    });
+  }
+
+  if (sameOriginUi) {
+    // /ui では同一オリジンで叩くため、API URL入力は不要（混乱を避ける）
+    apiBaseEl.value = "";
+    try {
+      const card = apiBaseEl.closest("section");
+      if (card) card.style.display = "none";
+    } catch {
+      /* noop */
+    }
+  } else {
+    apiBaseEl.value = loadApiBase();
+    updateApiBaseSummary();
+    // 未設定のときは「接続先」を開いておく（初回導線）
+    try {
+      if (connectAccordionEl) connectAccordionEl.open = !normalizeApiBase(apiBaseEl.value);
+    } catch {
+      /* noop */
+    }
+    // 前回 404 だったURLは、ページ再読み込み時の“1回目の404”すら出さない（静かなUX）
+    {
+      const apiBase = normalizeApiBase(apiBaseEl.value);
+      if (apiBase && isDiagUnsupported(apiBase)) {
+        diagUnsupportedFor = apiBase;
+      }
+    }
+  }
+  // モデル選択は環境差が大きいので、localStorage（前回選択）を優先する
+  {
+    const saved = loadModel();
+    if (saved && modelEl) {
+      // options がまだ無い（/diagnostics で後から埋まる）ケースに備えて保持
+      try {
+        modelEl.dataset.savedModel = saved;
+      } catch {
+        /* noop */
+      }
+      try {
+        modelEl.value = saved;
+      } catch {
+        /* noop */
+      }
+    }
+  }
+  updateSettingsSummary();
+
+  // 入力中にも要約を更新して、いま何を設定しているかが分かるようにする
+  apiBaseEl.addEventListener("input", () => updateApiBaseSummary());
+  kEl.addEventListener("input", () => updateSettingsSummary());
+  kEl.addEventListener("change", () => updateSettingsSummary());
+
   saveBtn.addEventListener("click", () => {
+    if (sameOriginUi) return;
     const v = normalizeApiBase(apiBaseEl.value);
     saveApiBase(v);
+    updateApiBaseSummary();
+    try {
+      // 設定が済んだら閉じて、チャットに集中できるようにする
+      if (connectAccordionEl && v) connectAccordionEl.open = false;
+    } catch {
+      /* noop */
+    }
     // “同じURLだがサーバーが更新された”ケースに備えて、保存時は一度だけ再判定できるよう解除
     unmarkDiagUnsupported(v);
     diagUnsupportedFor = null;
@@ -774,12 +961,14 @@ function main() {
   });
 
   modelEl.addEventListener("change", () => {
+    saveModel(modelEl.value);
+    updateSettingsSummary();
     refreshDiagnostics();
   });
 
   async function refreshSources() {
-    const apiBase = normalizeApiBase(apiBaseEl.value);
-    if (!apiBase) return;
+    const apiBase = sameOriginUi ? "" : normalizeApiBase(apiBaseEl.value);
+    if (!sameOriginUi && !apiBase) return;
     try {
       const data = await getSources(apiBase);
       if (!data.ok) {
@@ -896,10 +1085,12 @@ function main() {
     }
   }
 
-  async function refreshDiagnostics() {
-    const apiBase = normalizeApiBase(apiBaseEl.value);
-    const model = (modelEl && modelEl.value ? String(modelEl.value) : "gemma2:2b").trim() || "gemma2:2b";
-    if (!apiBase) return null;
+  async function refreshDiagnostics({ skipModelSync = false } = {}) {
+    const apiBase = sameOriginUi ? "" : normalizeApiBase(apiBaseEl.value);
+    const selectedModel = (modelEl && modelEl.value ? String(modelEl.value) : "").trim();
+    const savedModel = (modelEl && modelEl.dataset && modelEl.dataset.savedModel ? String(modelEl.dataset.savedModel) : "").trim();
+    const model = selectedModel || savedModel || null;
+    if (!sameOriginUi && !apiBase) return null;
     if (diagUnsupportedFor === apiBase) return null;
     try {
       const data = await getDiagnostics(apiBase, model);
@@ -918,6 +1109,63 @@ function main() {
         diagListEl.innerHTML = "";
         setGuardReason("diagnostics", false, "");
         return null;
+      }
+
+      // /diagnostics の返却（インストール済みモデル一覧）を元に、UIのモデル選択を自動更新する。
+      // - “未インストール固定”で赤になり続けるのを避ける
+      // - 埋め込みモデル（例: nomic-embed-text）は候補から除外する
+      if (!skipModelSync && modelEl) {
+        const allNames =
+          data && data.models && Array.isArray(data.models.names) ? uniqPreserve(data.models.names.map((x) => String(x))) : [];
+        const embedModel = data && data.meta && data.meta.embed_model ? String(data.meta.embed_model) : "";
+        const llmNames = allNames.filter((n) => !isLikelyEmbeddingModel(n, embedModel));
+        if (llmNames.length) {
+          const key = llmNames.join("|");
+          if (key !== lastModelOptionsKey) {
+            lastModelOptionsKey = key;
+            // options を総入替（インストール済みのみに限定）
+            try {
+              const frag = document.createDocumentFragment();
+              for (const n of llmNames) {
+                const opt = document.createElement("option");
+                opt.value = n;
+                opt.textContent = n;
+                frag.appendChild(opt);
+              }
+              modelEl.innerHTML = "";
+              modelEl.appendChild(frag);
+            } catch {
+              /* noop */
+            }
+          }
+
+          const current = String(modelEl.value || "").trim();
+          const requested = data && data.meta && data.meta.requested_model ? String(data.meta.requested_model) : "";
+          const next =
+            resolveWantedToInstalled(llmNames, current) ||
+            resolveWantedToInstalled(llmNames, savedModel) ||
+            resolveWantedToInstalled(llmNames, requested) ||
+            llmNames[0];
+
+          if (next && current !== next) {
+            try {
+              modelEl.value = next;
+            } catch {
+              /* noop */
+            }
+            try {
+              modelEl.dataset.savedModel = next;
+            } catch {
+              /* noop */
+            }
+            saveModel(next);
+          }
+
+          // モデルが変わった場合は、赤/黄表示を即時に更新するために再診断する
+          if (next && (model || "") !== next) {
+            return await refreshDiagnostics({ skipModelSync: true });
+          }
+        }
       }
 
       const overall = data.overall || {};
@@ -962,6 +1210,7 @@ function main() {
       } else {
         setGuardReason("diagnostics", false, "");
       }
+      updateSettingsSummary();
       return data;
     } catch (e) {
       // 旧API（/diagnostics未実装）もあり得るので、取得失敗では送信をブロックしない
@@ -987,9 +1236,12 @@ function main() {
           "- APIのURLを正しいURLに貼り替えて「保存」を押してください",
         ];
         diagErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
+        // /ui（同一オリジン）は URL入力が無いので、404抑止の永続化は不要
         diagUnsupportedFor = apiBase;
-        // 次回のページ再読み込みでも404を出さないように記録
-        markDiagUnsupported(apiBase);
+        if (!sameOriginUi) {
+          // 次回のページ再読み込みでも404を出さないように記録
+          markDiagUnsupported(apiBase);
+        }
         if (diagPollId) {
           clearInterval(diagPollId);
           diagPollId = null;
@@ -1175,15 +1427,29 @@ function main() {
 
   async function sendPrompt(prompt, { isResend = false } = {}) {
     if (busy) return;
-    const apiBase = normalizeApiBase(apiBaseEl.value);
-    const model = (modelEl.value || "gemma2:2b").trim();
+    const apiBase = sameOriginUi ? "" : normalizeApiBase(apiBaseEl.value);
+    const model =
+      String(modelEl.value || "").trim() ||
+      (() => {
+        try {
+          const opts = modelEl && modelEl.options ? Array.from(modelEl.options) : [];
+          const first = opts.map((o) => String((o && o.value) || "").trim()).find(Boolean);
+          return first || "";
+        } catch {
+          return "";
+        }
+      })();
     const k = Number(kEl.value || 3);
     const p = String(prompt || "").trim();
-    if (!apiBase) {
+    if (!sameOriginUi && !apiBase) {
       addMessage("error", "APIのURLを入力してください。", {
         actions: [],
         details: null,
       });
+      return;
+    }
+    if (!model) {
+      addMessage("error", "モデルを選択してください（環境チェックでインストール済みモデルを自動反映します）。", {});
       return;
     }
     if (guard && guard.blocked) {
@@ -1192,7 +1458,7 @@ function main() {
     }
     if (!p) return;
 
-    saveApiBase(apiBase);
+    if (!sameOriginUi) saveApiBase(apiBase);
     lastUserPrompt = p;
     updateComposerState();
 
@@ -1267,7 +1533,7 @@ function main() {
           if (st === "search") {
             stageHints.push("検索が遅い場合は k を小さくすると改善することがあります（例: 3→2→1）。");
           } else if (st === "generate") {
-            stageHints.push("生成が遅い場合は軽量モデル（例: gemma2:2b）に切り替えると改善することがあります。");
+            stageHints.push("生成が遅い場合は軽量モデル（例: gemma2:2b など）に切り替えると改善することがあります。");
           } else if (st === "embedding") {
             stageHints.push("embedding が遅い/失敗する場合は Ollama 起動・Embeddingモデルの有無を確認してください。");
           } else if (st === "index_check" || st === "index") {
@@ -1322,19 +1588,31 @@ function main() {
           );
         }
         if (st === "generate") {
-          actions.unshift({
-            label: "モデルを gemma2:2b にして再送",
-            kind: "secondary",
-            disabled: !(lastUserPrompt || "").trim(),
-            onClick: () => {
-              try {
-                modelEl.value = "gemma2:2b";
-              } catch {
-                /* noop */
-              }
-              sendPrompt(lastUserPrompt, { isResend: true });
-            },
-          });
+          const firstModel = (() => {
+            try {
+              const opts = modelEl && modelEl.options ? Array.from(modelEl.options) : [];
+              const first = opts.map((o) => String((o && o.value) || "").trim()).find(Boolean);
+              return first || "";
+            } catch {
+              return "";
+            }
+          })();
+          if (firstModel) {
+            actions.unshift({
+              label: `モデルを ${firstModel} にして再送`,
+              kind: "secondary",
+              disabled: !(lastUserPrompt || "").trim(),
+              onClick: () => {
+                try {
+                  modelEl.value = firstModel;
+                } catch {
+                  /* noop */
+                }
+                saveModel(firstModel);
+                sendPrompt(lastUserPrompt, { isResend: true });
+              },
+            });
+          }
         }
 
         const stageInfo = stage ? `詰まった工程: ${stageLabel(stage)}${code ? ` / code=${code}` : ""}` : "";
@@ -1444,7 +1722,9 @@ function main() {
 
   addMessage(
     "assistant",
-    "APIのURLを設定してから、質問を送ってください。\n\n（cloudflared の HTTPS URL を貼れば、GitHub Pages からでも利用できます）"
+    sameOriginUi
+      ? "この画面は API（FastAPI）と同じURLで動作します。接続先の設定は不要なので、そのまま質問を送ってください。"
+      : "APIのURLを設定してから、質問を送ってください。\n\n（cloudflared の HTTPS URL を貼れば、GitHub Pages からでも利用できます）"
   );
 
   refreshSources();
