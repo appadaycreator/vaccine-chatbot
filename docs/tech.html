@@ -63,7 +63,10 @@
           <li><code>PyPDFLoader</code>: PDF→テキスト抽出（標準フォールバック）</li>
           <li><code>PyMuPDFLoader</code>（任意）: PDF→テキスト抽出（段組/レイアウトで有利な場合あり、環境変数 <code>PDF_LOADER=pymupdf</code>）</li>
           <li><code>RecursiveCharacterTextSplitter</code>: チャンク分割</li>
-          <li><code>ChromaDB</code>: ベクトルDB（永続化ディレクトリ: 既定 <code>./chroma_db</code>）</li>
+          <li>
+            <code>ChromaDB</code>: ベクトルDB（永続化ディレクトリ: 既定 <code>./chroma_db</code> / 書き込み不可の場合はユーザー領域へフォールバック。
+            安全のため自動削除/置換対象は <code>chroma_db*</code> のみに限定）
+          </li>
         </ul>
         <p class="muted small">
           PDFは <code>./pdfs</code>（環境変数 <code>PDF_DIR</code>）に配置します。追加/更新後は <code>POST /reload</code> で索引（検索の準備）を作り直して反映できます。

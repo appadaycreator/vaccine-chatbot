@@ -348,6 +348,12 @@ curl -X POST "http://localhost:8000/generate" \
 
 APIサーバーは起動時に `./chroma_db` を読み込みます。未作成の場合は、既定で `vaccine_manual.pdf`（または `PDF_PATH` 環境変数で指定したPDF）から自動構築します。
 
+注意:
+
+- **永続化ディレクトリは書き込み可能である必要があります**（`attempt to write a readonly database` が出る場合は、権限/所有者/マウント設定の問題です）
+- **安全のため、APIが自動で削除/置換する永続化ディレクトリ名は `chroma_db*` のみに制限**しています（例: `chroma_db_8001` のようなポート別分割は可）
+- `CHROMA_PERSIST_DIR` が書き込み不可の場合、APIは **ユーザー書き込み領域へフォールバック**します（macOS: `~/Library/Application Support/vaccine-chatbot/chroma_db`）
+
 環境変数:
 
 - `PDF_PATH`: 取り込むPDFパス（既定: `vaccine_manual.pdf`）

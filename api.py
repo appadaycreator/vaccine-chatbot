@@ -684,11 +684,81 @@ def _save_index_manifest(persist_dir: str, data: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def _safe_reset_persist_dir(persist_dir: str) -> None:
-    # 誤爆防止：基本は "chroma_db" 直下のみ削除を許可
+def _is_safe_persist_dir(persist_dir: str) -> bool:
+    """
+    誤爆防止のため、APIが自動削除/置換してよい永続化ディレクトリ名を制限する。
+    - 既定: chroma_db
+    - 互換: chroma_db_8001 等（ポート別に分けたい用途）
+    - 内部用: chroma_db.__building__/chroma_db.__backup__ など（アトミック更新）
+    """
     base = os.path.basename(os.path.abspath(persist_dir))
-    if base != "chroma_db":
-        raise RuntimeError(f"安全のため persist_dir の自動削除は chroma_db のみに限定しています: {persist_dir}")
+    return bool(base) and base.startswith("chroma_db")
+
+
+def _is_readonly_db_error(e: Exception) -> bool:
+    """
+    Chroma（SQLite）永続化先が read-only のときに出る典型的な文言を検出する。
+    例: "attempt to write a readonly database"
+    """
+    msg = str(e or "")
+    low = msg.lower()
+    return any(
+        s in low
+        for s in [
+            "attempt to write a readonly database",
+            "readonly database",
+            "read-only database",
+            "sqlite_readonly",
+            "permission denied",
+        ]
+    )
+
+
+def _is_dir_writable(path: str) -> bool:
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".write_test")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+        return True
+    except Exception:
+        return False
+
+
+def _default_persist_base_dir() -> str:
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        return os.path.join(home, "Library", "Application Support", "vaccine-chatbot")
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return os.path.join(xdg, "vaccine-chatbot")
+    return os.path.join(home, ".local", "share", "vaccine-chatbot")
+
+
+def _resolve_persist_dir(requested: str) -> tuple[str, list[str]]:
+    """
+    永続化先が書き込み不可の場合にフォールバックする。
+    - requested が書き込み可: そのまま
+    - 書き込み不可: OS標準のユーザー書き込み領域へ退避
+    """
+    req = (requested or "").strip() or DEFAULT_PERSIST_DIR
+    warnings: list[str] = []
+
+    # 相対パスは作業ディレクトリ基準のまま（launchd で WorkingDirectory が設定される想定）
+    if _is_dir_writable(req):
+        return req, warnings
+
+    base = _default_persist_base_dir()
+    fallback = os.path.join(base, "chroma_db")
+    warnings.append(f"CHROMA_PERSIST_DIR（{req}）が書き込み不可のため、{fallback} を使用します。")
+    return fallback, warnings
+
+
+def _safe_reset_persist_dir(persist_dir: str) -> None:
+    # 誤爆防止：chroma_db 系のみ削除/再作成を許可
+    if not _is_safe_persist_dir(persist_dir):
+        raise RuntimeError(f"安全のため persist_dir の自動削除は chroma_db* のみに限定しています: {persist_dir}")
     if os.path.isdir(persist_dir):
         shutil.rmtree(persist_dir)
     os.makedirs(persist_dir, exist_ok=True)
@@ -975,11 +1045,58 @@ def _rebuild_vectorstore(paths: list[str], persist_dir: str) -> tuple[Chroma, di
     except Exception as e:
         raise IndexBuildError(f"Embeddingモデルの準備確認に失敗しました: {e}", report)
 
-    # 既存DBがある場合も、ソースが変わったら作り直す（重複/ゴミ混入を避ける）
-    _safe_reset_persist_dir(persist_dir)
+    # 誤爆防止（危険なパスは触らない）
+    if not _is_safe_persist_dir(persist_dir):
+        raise IndexBuildError(
+            f"安全のため persist_dir の自動削除は chroma_db* のみに限定しています: {persist_dir}",
+            report,
+        )
+
+    # 既存DBを壊さないため、まず別ディレクトリにビルドしてからアトミックに置換する
+    stamp = int(time.time() * 1000)
+    build_dir = f"{persist_dir}.__building__{stamp}"
+    backup_dir = f"{persist_dir}.__backup__{stamp}"
+
+    # 古い途中生成物があれば掃除（安全域のみ）
+    try:
+        if os.path.isdir(build_dir):
+            shutil.rmtree(build_dir)
+        if os.path.isdir(backup_dir):
+            shutil.rmtree(backup_dir)
+    except Exception:
+        pass
+
+    os.makedirs(build_dir, exist_ok=True)
     embeddings = OllamaEmbeddings(model=DEFAULT_EMBED_MODEL)
-    vs = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=persist_dir)
-    _persist_if_supported(vs)
+    vs_build = Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=build_dir)
+    _persist_if_supported(vs_build)
+
+    # 置換（失敗時はできるだけロールバック）
+    try:
+        if os.path.isdir(persist_dir):
+            os.replace(persist_dir, backup_dir)
+        elif os.path.exists(persist_dir):
+            # 予期せぬファイル形状は危険なので中断
+            raise RuntimeError(f"persist_dir がディレクトリではありません: {persist_dir}")
+        os.replace(build_dir, persist_dir)
+        if os.path.isdir(backup_dir):
+            shutil.rmtree(backup_dir)
+    except Exception:
+        # ロールバック（best effort）
+        try:
+            if (not os.path.isdir(persist_dir)) and os.path.isdir(backup_dir):
+                os.replace(backup_dir, persist_dir)
+        except Exception:
+            pass
+        try:
+            if os.path.isdir(build_dir):
+                shutil.rmtree(build_dir)
+        except Exception:
+            pass
+        raise
+
+    # 最終パスでロードし直す（内部参照のズレを避ける）
+    vs = _load_vectorstore(persist_dir)
     return vs, report
 
 
@@ -1010,10 +1127,15 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
         return
 
     # 既存DBがあり、ソースが変わっていないならロードで済ませる
-    if (not force) and os.path.isdir(persist_dir):
+    #
+    # 重要:
+    # - last_sig が一致しない（=未知/変更あり）状態で Chroma を先に初期化すると、
+    #   その後の再構築で persist_dir を削除した際に内部状態が不整合になり、
+    #   SQLite が「readonly database」になるケースがあるため、先に一致確認を行う。
+    if (not force) and last_sig == sig and os.path.isdir(persist_dir):
         try:
             vs = _load_vectorstore(persist_dir)
-            if _is_vectorstore_ready(vs) and last_sig == sig:
+            if _is_vectorstore_ready(vs):
                 app.state.vectorstore = vs
                 return
         except Exception:
@@ -1047,7 +1169,24 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
         prev_sig = getattr(app.state, "source_signature", None)
 
         # 作り直し（失敗時に既存DBを維持できるよう、_rebuild_vectorstore 側で先に解析する）
-        vs, report = _rebuild_vectorstore(paths, persist_dir)
+        try:
+            vs, report = _rebuild_vectorstore(paths, persist_dir)
+        except Exception as e:
+            # 永続化先が read-only/権限不足なら、ユーザー書き込み領域へ退避して1回だけ再試行
+            # - 既存の DB が root 所有/権限不整合になっているケースで自己回復しやすくする
+            if _is_readonly_db_error(e):
+                req = getattr(app.state, "persist_dir_requested", persist_dir) or persist_dir
+                fallback, warns = _resolve_persist_dir(str(req))
+                if fallback and fallback != persist_dir:
+                    app.state.persist_dir = fallback
+                    app.state.persist_dir_warnings = list(warns or []) + [
+                        f"永続化先の書き込みエラーのため、{fallback} へ切り替えて再試行します。"
+                    ]
+                    vs, report = _rebuild_vectorstore(paths, fallback)
+                else:
+                    raise
+            else:
+                raise
         app.state.vectorstore = vs
         app.state.source_signature = sig
         app.state.last_indexed_at = _utc_now_iso()
@@ -1094,7 +1233,14 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
             "スキャンPDFの場合はOCRしてから配置してください",
             "PDFを追加・更新したら POST /reload で再インデックスしてください",
         ]
-        if _is_ollama_down_error(e):
+        if _is_readonly_db_error(e):
+            err_code = "PERSIST_DIR_READONLY"
+            err_hints = [
+                "CHROMA_PERSIST_DIR（既定: ./chroma_db）が書き込み可能か確認してください（権限/所有者/マウント設定）",
+                "必要なら CHROMA_PERSIST_DIR をユーザー書き込み可能な場所へ変更してください（例: macOS は ~/Library/Application Support/vaccine-chatbot/chroma_db）",
+                "書き込み先を直した後に POST /reload を実行してください",
+            ]
+        elif _is_ollama_down_error(e):
             err_code = "OLLAMA_UNAVAILABLE"
             err_hints = [
                 "Ollama が起動しているか確認してください",
@@ -1149,7 +1295,8 @@ def _ensure_index_uptodate(force: bool = False, trigger: str = "auto") -> None:
 
 @app.on_event("startup")
 async def _startup() -> None:
-    persist_dir = os.environ.get("CHROMA_PERSIST_DIR", DEFAULT_PERSIST_DIR)
+    persist_dir_req = os.environ.get("CHROMA_PERSIST_DIR", DEFAULT_PERSIST_DIR)
+    persist_dir, persist_warnings = _resolve_persist_dir(persist_dir_req)
     pdf_path = os.environ.get("PDF_PATH", DEFAULT_PDF_PATH)
     pdf_dir = os.environ.get("PDF_DIR", DEFAULT_PDF_DIR)
     run_mode = os.environ.get("RUN_MODE", "prod").strip() or "prod"
@@ -1158,6 +1305,8 @@ async def _startup() -> None:
     app.state.vectorstore = None
     app.state.init_error = None
     app.state.persist_dir = persist_dir
+    app.state.persist_dir_requested = persist_dir_req
+    app.state.persist_dir_warnings = persist_warnings
     app.state.pdf_path = pdf_path
     app.state.pdf_dir = pdf_dir
     app.state.started_at = APP_STARTED_AT
@@ -1230,6 +1379,8 @@ async def _startup() -> None:
                     "pdf_dir": pdf_dir,
                     "legacy_pdf_dir": LEGACY_PDF_DIR,
                     "persist_dir": persist_dir,
+                    "persist_dir_requested": persist_dir_req,
+                    "persist_dir_warnings": persist_warnings,
                     "embed_model": DEFAULT_EMBED_MODEL,
                     "embed_cache_max": int(os.environ.get("EMBED_CACHE_MAX", str(DEFAULT_CACHE_MAX_ENTRIES))),
                     "python": platform.python_version(),
@@ -1259,6 +1410,8 @@ def status() -> dict[str, Any]:
         "run_mode": getattr(app.state, "run_mode", None),
         "ready": app.state.vectorstore is not None,
         "persist_dir": getattr(app.state, "persist_dir", DEFAULT_PERSIST_DIR),
+        "persist_dir_requested": getattr(app.state, "persist_dir_requested", None),
+        "persist_dir_warnings": getattr(app.state, "persist_dir_warnings", None),
         "pdf_path": getattr(app.state, "pdf_path", DEFAULT_PDF_PATH),
         "pdf_dir": getattr(app.state, "pdf_dir", DEFAULT_PDF_DIR),
         "legacy_pdf_dir": LEGACY_PDF_DIR,
@@ -1341,6 +1494,8 @@ def list_sources() -> dict[str, Any]:
         "indexing": index_status,
         "last_indexed_at": getattr(app.state, "last_indexed_at", None),
         "persist_dir": persist_dir,
+        "persist_dir_requested": getattr(app.state, "persist_dir_requested", None),
+        "persist_dir_warnings": getattr(app.state, "persist_dir_warnings", None),
         "pdf_path": pdf_path,
         "pdf_dir": pdf_dir,
         "legacy_pdf_dir": LEGACY_PDF_DIR,

@@ -4,9 +4,10 @@ __pycache__/
 .DS_Store
 api.log
 api.error.log
-chroma_db/
+chroma_db*/
 pdfs/
 uploads/
+_chroma_test/
 
 # Streamlit / Python caches
 .streamlit/
