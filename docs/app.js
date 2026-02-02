@@ -222,7 +222,20 @@ function resolveWantedToInstalled(modelNames, wanted) {
   const exact = names.find((n) => String(n) === w);
   if (exact) return String(exact);
   const prefix = names.find((n) => String(n).startsWith(w + ":"));
-  return prefix ? String(prefix) : "";
+  if (prefix) return String(prefix);
+
+  // 例: wanted=gemma2:2b だが installed は gemma2 / gemma2:latest のみ、のようなケースを救う
+  // - UIは過去の選択（localStorage）を保持するため、タグ違いで「赤」が固定化しやすい
+  if (w.includes(":")) {
+    const base = w.split(":")[0];
+    if (base) {
+      const baseExact = names.find((n) => String(n) === base);
+      if (baseExact) return String(baseExact);
+      const basePrefix = names.find((n) => String(n).startsWith(base + ":"));
+      if (basePrefix) return String(basePrefix);
+    }
+  }
+  return "";
 }
 
 function isLikelyEmbeddingModel(name, embedModel) {

@@ -1924,15 +1924,50 @@ def _model_names_from_ollama_list(payload: Any) -> list[str]:
     ollama.list() の戻りはバージョン差があり得るため、防御的にモデル名配列へ正規化する。
     期待値: {"models":[{"name":"gemma2:2b", ...}, ...]}
     """
-    if not isinstance(payload, dict):
+    # 新しめの ollama Python SDK では ListResponse(models=[Model(model="gemma2:2b", ...), ...]) のような
+    # “dict ではない”戻りになることがあるため、両方を吸収する。
+    try:
+        # pydantic v2 系: model_dump
+        if not isinstance(payload, dict) and hasattr(payload, "model_dump"):
+            dumped = payload.model_dump()  # type: ignore[attr-defined]
+            if isinstance(dumped, dict):
+                payload = dumped
+    except Exception:
+        pass
+
+    models = payload.get("models") if isinstance(payload, dict) else getattr(payload, "models", None)
+    if models is None:
         return []
-    models = payload.get("models")
     if not isinstance(models, list):
-        return []
+        try:
+            models = list(models)  # type: ignore[arg-type]
+        except Exception:
+            return []
+
     names: list[str] = []
     for m in models:
-        if isinstance(m, dict) and isinstance(m.get("name"), str):
-            names.append(m["name"])
+        name: str | None = None
+        if isinstance(m, dict):
+            v = m.get("name") or m.get("model")
+            if isinstance(v, str) and v.strip():
+                name = v.strip()
+        else:
+            for attr in ("name", "model"):
+                v = getattr(m, attr, None)
+                if isinstance(v, str) and v.strip():
+                    name = v.strip()
+                    break
+            if name is None:
+                try:
+                    md = m.model_dump() if hasattr(m, "model_dump") else (m.dict() if hasattr(m, "dict") else None)
+                    if isinstance(md, dict):
+                        v = md.get("name") or md.get("model")
+                        if isinstance(v, str) and v.strip():
+                            name = v.strip()
+                except Exception:
+                    pass
+        if name:
+            names.append(name)
     return names
 
 

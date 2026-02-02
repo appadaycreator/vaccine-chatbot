@@ -53,8 +53,15 @@ pip install -r requirements.txt
 ### 3) Ollama モデル（初回のみ）
 
 ```bash
+# 生成（回答）モデル: どれか1つ以上
+# 例: 迷ったらまずはこれ（タグは gemma2:latest 等になることがあります）
 ollama pull gemma2
+# 例: 軽量モデルを明示する場合（環境により gemma2:2b を選びたい場合）
+# ollama pull gemma2:2b
+# 例: 追加で別モデルも使う場合
 ollama pull llama3.1
+
+# embedding（RAG / PDF検索に必須）
 ollama pull nomic-embed-text
 ```
 
@@ -63,6 +70,7 @@ ollama pull nomic-embed-text
 - **RAG（PDF検索）には embedding モデル（`nomic-embed-text`）が必須**です。未導入だと環境チェックで **「赤: 要対応」** になり、検索できません。
 - 対処:
   - `ollama pull nomic-embed-text`
+  - 生成モデルは、`gemma2` のような「タグ無し名」で pull/run しても、Ollama 側で `:latest` 等のタグが付くことがあります（UIはインストール済み名を候補表示します）。
 
 ## 使い方（CLI）
 

@@ -12,15 +12,39 @@ def _normalize_newlines(text: str) -> str:
 
 
 def _model_names_from_ollama_list(payload) -> list[str]:
-    if not isinstance(payload, dict):
+    # ollama.list() は SDK バージョンで戻り型が変わる（dict / ListResponse）ため両対応する
+    try:
+        if not isinstance(payload, dict) and hasattr(payload, "model_dump"):
+            dumped = payload.model_dump()  # type: ignore[attr-defined]
+            if isinstance(dumped, dict):
+                payload = dumped
+    except Exception:
+        pass
+
+    models = payload.get("models") if isinstance(payload, dict) else getattr(payload, "models", None)
+    if models is None:
         return []
-    models = payload.get("models")
     if not isinstance(models, list):
-        return []
+        try:
+            models = list(models)
+        except Exception:
+            return []
+
     out: list[str] = []
     for m in models:
-        if isinstance(m, dict) and isinstance(m.get("name"), str):
-            out.append(m["name"])
+        name = None
+        if isinstance(m, dict):
+            v = m.get("name") or m.get("model")
+            if isinstance(v, str) and v.strip():
+                name = v.strip()
+        else:
+            for attr in ("name", "model"):
+                v = getattr(m, attr, None)
+                if isinstance(v, str) and v.strip():
+                    name = v.strip()
+                    break
+        if name:
+            out.append(name)
     return out
 
 
