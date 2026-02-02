@@ -146,8 +146,8 @@ def _new_request_id() -> str:
 
 # 回答品質（医療系の言い方）を最低ラインで保証するための固定フォーマット
 # - 断定・誤誘導を避けるため、根拠（sources）が取れない場合は必ず「資料にない」を返す
-# - ユーザーが次に取る行動（相談先）を必ず出す
-ANSWER_SECTIONS = ("結論", "根拠", "相談先")
+# - 回答の構造を固定し、余計なセクションを出さない
+ANSWER_SECTIONS = ("結論", "根拠")
 
 _JP_TERM_RE = re.compile(r"[一-龥ぁ-んァ-ン]{2,}|[A-Za-z0-9]{2,}")
 _DEFAULT_TERM_STOPWORDS = {
@@ -268,7 +268,7 @@ def _normalize_answer_text(answer: str, *, fallback_used: bool) -> str:
     norm_lines: list[str] = []
     for raw in text.split("\n"):
         line = raw.rstrip()
-        m = re.match(r"^\s*#{1,6}\s*(結論|根拠|相談先)\s*[:：]?\s*(.*)$", line)
+        m = re.match(r"^\s*#{1,6}\s*(結論|根拠)\s*[:：]?\s*(.*)$", line)
         if m:
             head = m.group(1)
             rest = (m.group(2) or "").strip()
@@ -286,7 +286,7 @@ def _normalize_answer_text(answer: str, *, fallback_used: bool) -> str:
         text2 = text2.replace("【資料】", "【参考情報】")
 
     # セクションを抽出して、必ず3セクション構造に組み直す
-    sec_re = re.compile(r"^(結論|根拠|相談先):\s*(.*)$")
+    sec_re = re.compile(r"^(結論|根拠):\s*(.*)$")
     order = list(ANSWER_SECTIONS)
     buckets: dict[str, list[str]] = {k: [] for k in order}
     current: str | None = None
@@ -318,23 +318,6 @@ def _normalize_answer_text(answer: str, *, fallback_used: bool) -> str:
 
     conclusion = _clean_block(buckets.get("結論", []))
     rationale = _clean_block(buckets.get("根拠", []))
-    consult = _clean_block(buckets.get("相談先", []))
-
-    # 相談先が崩れやすいので、最低限の形に補正する
-    default_consult = "- 接種を受けた医療機関\n- お住まいの自治体の予防接種相談窓口\n- 症状が強い／急に悪化した／緊急性が疑われる場合: 119（救急）"
-    if not consult:
-        consult = default_consult
-    else:
-        # 箇条書きに寄せる（単文だけのケース）
-        if not any(ln.lstrip().startswith(("-", "・", "*")) for ln in consult.split("\n") if ln.strip()):
-            consult = "- " + consult.strip()
-        # 医療機関/自治体/119 は最低限含める（UIの常設導線に合わせる）
-        if "医療機関" not in consult and "かかりつけ" not in consult:
-            consult = consult.rstrip() + "\n- 接種を受けた医療機関"
-        if "自治体" not in consult:
-            consult = consult.rstrip() + "\n- お住まいの自治体の予防接種相談窓口"
-        if "119" not in consult:
-            consult = consult.rstrip() + "\n- 症状が強い／急に悪化した／緊急性が疑われる場合: 119（救急）"
 
     # 根拠が空なら最低限の文言を入れる（空出力防止）
     if not rationale:
@@ -344,7 +327,7 @@ def _normalize_answer_text(answer: str, *, fallback_used: bool) -> str:
     if not conclusion:
         conclusion = "（回答を生成できませんでした）"
 
-    out = f"結論:\n{conclusion}\n\n根拠:\n{rationale}\n\n相談先:\n{consult}\n"
+    out = f"結論:\n{conclusion}\n\n根拠:\n{rationale}\n"
     # 余計な二重スペースなどを軽く掃除
     out = re.sub(r"[ \t]+\n", "\n", out)
     out = re.sub(r"\n{3,}", "\n\n", out).strip()
@@ -359,11 +342,7 @@ def _no_sources_answer(question: str) -> str:
         "資料に記載がないため、この資料に基づく回答はできません。"
         f"{qline}\n\n"
         "根拠:\n"
-        "- 資料にない（参照PDFから該当箇所を特定できませんでした）\n\n"
-        "相談先:\n"
-        "- 接種を受けた医療機関\n"
-        "- お住まいの自治体の予防接種相談窓口\n"
-        "- 症状が強い／急に悪化した／緊急性が疑われる場合: 119（救急）\n"
+        "- 資料にない（参照PDFから該当箇所を特定できませんでした）\n"
     )
 
 
@@ -376,17 +355,15 @@ def _build_answer_prompt(*, question: str, context: str) -> str:
 あなたは医療情報の文脈で、厚労省等の配布資料（下の【資料】）に基づいて回答するアシスタントです。
 推測や一般論で補完してはいけません。【資料】に書かれていないことは「資料にない」と明確に述べてください。
 
-必ず次の3セクションだけで出力してください（見出し名は固定、Markdownの # や ## は使わない）:
+必ず次の2セクションだけで出力してください（見出し名は固定、Markdownの # や ## は使わない）:
 結論:
 根拠:
-相談先:
 
 ルール:
 - 【資料】に書かれていない内容を断定しない（曖昧にそれっぽく言わない）
 - 「根拠」には、【資料】から該当箇所をページラベル（例: [P3]）つきで引用/要約して箇条書きで示す
-- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
 - 余計な免責文や追加セクション（注意/補足など）は出さない（UI側で常設するため）
-- 見出しは必ず `結論:` / `根拠:` / `相談先:` のプレーンテキストのみ（Markdown見出しにしない）
+- 見出しは必ず `結論:` / `根拠:` のプレーンテキストのみ（Markdown見出しにしない）
 
 【資料】:
 {context}
@@ -410,25 +387,21 @@ def _build_general_fallback_prompt(*, question: str, reference: str) -> str:
     """
     参照PDFから該当箇所が取れなかったときの一般説明用プロンプト。
     - 参照PDFに基づくと“断定しない”
-    - ただしユーザーが次に取れる行動（相談先）を必ず出す
     """
     return f"""
 あなたは医療情報の文脈で回答するアシスタントです。
 現在、参照PDFから質問の該当箇所を特定できていません。
 そのため、以下の【参考情報】と一般的な注意として、断定を避けつつ回答してください。
 
-必ず次の3セクションだけで出力してください（見出し名は固定、Markdownの # や ## は使わない）:
+必ず次の2セクションだけで出力してください（見出し名は固定、Markdownの # や ## は使わない）:
 結論:
 根拠:
-相談先:
 
 ルール:
 - 参照PDFに基づくと断定しない（ページラベルの引用もしない）
 - ページ番号や `[P12]` のような表記は一切出力しない
-- 見出しは必ず `結論:` / `根拠:` / `相談先:` のプレーンテキストのみ
+- 見出しは必ず `結論:` / `根拠:` のプレーンテキストのみ
 - 「根拠」には、【参考情報】からの引用/要約と、「一般的には…」のような前置きを使って不確実性を明示する
-- 医療判断（診断/治療の指示）をしない。迷う場合は相談先へ誘導する
-- 「相談先」は必ず1つ以上。緊急性が疑われる場合は救急（119）も含める
 - 余計な追加セクション（注意/補足など）は出さない
 
 【参考情報】:
