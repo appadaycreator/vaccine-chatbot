@@ -1573,3 +1573,164 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
     )
     return {"answer": gen_res["answer"], "sources": sources, "timings": timings}
 
+
+def _level_rank(level: str) -> int:
+    lv = (level or "").strip().lower()
+    if lv == "red":
+        return 2
+    if lv == "yellow":
+        return 1
+    return 0
+
+
+def _max_level(levels: list[str]) -> str:
+    best = "green"
+    for lv in levels:
+        if _level_rank(lv) > _level_rank(best):
+            best = lv
+    return best
+
+
+def _model_names_from_ollama_list(payload: Any) -> list[str]:
+    """
+    ollama.list() の戻りはバージョン差があり得るため、防御的にモデル名配列へ正規化する。
+    期待値: {"models":[{"name":"gemma2:2b", ...}, ...]}
+    """
+    if not isinstance(payload, dict):
+        return []
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return []
+    names: list[str] = []
+    for m in models:
+        if isinstance(m, dict) and isinstance(m.get("name"), str):
+            names.append(m["name"])
+    return names
+
+
+def _has_model(model_names: list[str], wanted: str) -> bool:
+    w = (wanted or "").strip()
+    if not w:
+        return False
+    # ollama list では :latest が付くことがあるので、prefix も許容
+    return any(n == w or n.startswith(w + ":") for n in model_names)
+
+
+@app.get("/diagnostics")
+async def diagnostics(model: str | None = None) -> dict[str, Any]:
+    """
+    GitHub Pages（docs/）の「環境チェック」から呼ばれる診断API。
+    - Ollama 疎通
+    - モデルの有無（生成/embedding）
+    - embedding の簡易スモークテスト
+    """
+    requested_model = (model or "gemma2:2b").strip() or "gemma2:2b"
+    embed_model = DEFAULT_EMBED_MODEL
+
+    checks: list[dict[str, Any]] = []
+
+    def add_check(level: str, label: str, message: str, hints: Optional[list[str]] = None) -> None:
+        item: dict[str, Any] = {"level": level, "label": label, "message": message}
+        if hints:
+            item["hints"] = [str(x) for x in hints]
+        checks.append(item)
+
+    # タイムアウトは短め（UIが固まらないように）
+    list_timeout_s = float(os.environ.get("DIAG_LIST_TIMEOUT_S", "3.0"))
+    embed_timeout_s = float(os.environ.get("DIAG_EMBED_TIMEOUT_S", "6.0"))
+
+    model_names: list[str] = []
+    ollama_ok = False
+    try:
+        info = await asyncio.wait_for(asyncio.to_thread(ollama.list), timeout=list_timeout_s)
+        model_names = _model_names_from_ollama_list(info)
+        ollama_ok = True
+        add_check("green", "Ollama疎通", "Ollama に接続できました。")
+    except TimeoutError:
+        add_check(
+            "red",
+            "Ollama疎通",
+            "Ollama への接続がタイムアウトしました。",
+            hints=[
+                "Ollama が起動しているか確認してください（例: brew services start ollama）",
+                "サーバー負荷が高い場合は時間をおいて再試行してください",
+            ],
+        )
+    except Exception as e:
+        add_check(
+            "red",
+            "Ollama疎通",
+            f"Ollama に接続できませんでした: {e}",
+            hints=[
+                "Ollama が起動しているか確認してください",
+                "環境変数 OLLAMA_HOST を変更している場合は値を確認してください",
+            ],
+        )
+
+    if ollama_ok:
+        if _has_model(model_names, requested_model):
+            add_check("green", "回答モデル", f"回答モデル（{requested_model}）が見つかりました。")
+        else:
+            add_check(
+                "red",
+                "回答モデル",
+                f"回答モデル（{requested_model}）が見つかりません。",
+                hints=[f"ollama pull {requested_model}", "UIのモデル選択を、インストール済みモデルに変更してください"],
+            )
+
+        if _has_model(model_names, embed_model):
+            add_check("green", "Embeddingモデル", f"Embeddingモデル（{embed_model}）が見つかりました。")
+        else:
+            add_check(
+                "red",
+                "Embeddingモデル",
+                f"Embeddingモデル（{embed_model}）が見つかりません。",
+                hints=[f"ollama pull {embed_model}", "RAG（PDF検索）は embedding モデルが無いと動きません"],
+            )
+
+        # embedding の簡易チェック（存在しないと確実に失敗するので、存在確認が通った場合だけ実施）
+        if _has_model(model_names, embed_model):
+            try:
+                embeddings = getattr(app.state, "embeddings", None) or OllamaEmbeddings(model=embed_model)
+                vec = await asyncio.wait_for(asyncio.to_thread(embeddings.embed_query, "diag"), timeout=embed_timeout_s)
+                ok = isinstance(vec, list) and len(vec) > 0
+                add_check("green" if ok else "yellow", "Embedding動作", "Embedding のスモークテストが完了しました。" if ok else "Embedding の結果が不正です。")
+            except TimeoutError:
+                add_check(
+                    "yellow",
+                    "Embedding動作",
+                    "Embedding のスモークテストがタイムアウトしました（初回起動や高負荷の可能性）。",
+                    hints=[
+                        "初回はモデル起動で時間がかかる場合があります。少し待って再試行してください",
+                        "必要なら DIAG_EMBED_TIMEOUT_S を延長してください",
+                    ],
+                )
+            except Exception as e:
+                add_check(
+                    "red",
+                    "Embedding動作",
+                    f"Embedding のスモークテストに失敗しました: {e}",
+                    hints=[
+                        "Ollama が起動しているか確認してください",
+                        f"ollama pull {embed_model} を実行してください",
+                    ],
+                )
+
+    overall_level = _max_level([str(c.get("level") or "green") for c in checks] or ["yellow"])
+    summary = {"green": "OK", "yellow": "一部注意", "red": "要対応"}.get(overall_level, "未確認")
+
+    return {
+        "ok": True,
+        "overall": {"level": overall_level, "summary": summary},
+        "checks": checks,
+        "models": {"count": len(model_names), "names": model_names[:50]},
+        "meta": {
+            "requested_model": requested_model,
+            "embed_model": embed_model,
+            "run_mode": getattr(app.state, "run_mode", None),
+            "version": getattr(app.state, "version", None),
+            "git_sha": getattr(app.state, "git_sha", None),
+            "started_at": getattr(app.state, "started_at", None),
+        },
+    }
+

@@ -169,8 +169,9 @@ cloudflared tunnel --url http://localhost:8000
 
 ### 404（Not Found）が出る場合
 
-フロント（`docs/app.js`）は **基本的に `POST /chat` のみ**を叩きます。  
-それでも 404 が出る場合は、API Base URL が **FastAPI（uvicorn）ではなく別サービス（例: Streamlit 等）**を指している可能性が高いです。
+フロント（`docs/app.js`）は主に `POST /chat` を叩きますが、起動時に **環境チェック（`GET /diagnostics`）** と
+**参照ソース確認（`GET /sources`）** も行います。  
+これらが 404 の場合は、API Base URL が **FastAPI（uvicorn）ではなく別サービス（例: Streamlit 等）**を指している可能性が高いです。
 
 - まず確認: `GET /health` と `GET /status` が返るか
 - 404 になる場合: `cloudflared tunnel --url http://localhost:8000` で発行されたURLを貼り直してください
