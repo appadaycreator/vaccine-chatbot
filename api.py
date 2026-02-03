@@ -379,11 +379,20 @@ else:
     )
 
 # GitHub Pages（外部）からのアクセスを許可する設定
+# 5xx 等のエラー応答でも CORS ヘッダーが付くよう、例外ハンドラ内でも明示付与する
+def _add_cors_headers_to_response(response: JSONResponse) -> None:
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Expose-Headers"] = REQUEST_ID_HEADER
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # 公開時はGitHub PagesのURLに制限すると安全です
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[REQUEST_ID_HEADER],
 )
 
 
@@ -465,6 +474,7 @@ async def _observability_http_exception_handler(request: Request, exc: HTTPExcep
 
     resp = JSONResponse(status_code=exc.status_code, content={"detail": detail})
     resp.headers[REQUEST_ID_HEADER] = rid
+    _add_cors_headers_to_response(resp)
     return resp
 
 
@@ -513,6 +523,7 @@ async def _observability_unhandled_exception_handler(request: Request, exc: Exce
         },
     )
     resp.headers[REQUEST_ID_HEADER] = rid
+    _add_cors_headers_to_response(resp)
     return resp
 
 

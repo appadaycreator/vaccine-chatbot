@@ -221,6 +221,13 @@ cloudflared tunnel --url http://localhost:8000
 - GitHub Pages から使う場合でも、API側は CORS を許可している必要があります（本リポジトリの FastAPI は CORS を有効化しています）。
 - **推奨導線**（CORS回避）: API配下の `http://127.0.0.1:8000/ui/`（または公開URLの `/ui/`）で開くと、同一オリジンになり CORS の影響を受けません。
 
+### 530 と CORS が同時に出る場合
+
+- **530** は Cloudflare / cloudflared が「オリジン（API サーバー）に届かなかった」ときに返すステータスです。
+- このとき応答は API ではなく Cloudflare から返るため、**CORS ヘッダーが付かず**、ブラウザが「CORS policy でブロック」と表示することがあります。
+- **対処**: API を動かしている端末で **uvicorn（API）が起動しているか**、**cloudflared トンネルが接続中か**を確認してください。トンネルを再起動（`cloudflared tunnel --url http://localhost:8000` のやり直し）で解消することが多いです。
+- UI では 530 やネットワークエラー時に「cloudflared トンネルと API サーバーが起動しているか確認してください」という対処を表示するようにしています。
+
 ### PDFを追加する（アップロード機能は無し）
 
 ブラウザからのPDFアップロードは使わず、**Mac mini 側でPDFを配置して参照**します。

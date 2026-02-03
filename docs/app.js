@@ -518,13 +518,22 @@ function addMessage(role, content, meta = {}) {
 }
 
 async function postJson(url, payload, { signal } = {}) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal,
-  });
-  const bodyText = await res.text();
+  let res, bodyText;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal,
+    });
+    bodyText = await res.text();
+  } catch (e) {
+    const err = new Error("API に接続できません（ネットワークエラー）");
+    err.status = 0;
+    err.cause = e;
+    err.detail = { message: err.message, hints: [apiConnectionHint(530)] };
+    throw err;
+  }
   let body;
   try {
     body = JSON.parse(bodyText);
@@ -535,7 +544,10 @@ async function postJson(url, payload, { signal } = {}) {
     const detail = body && body.detail ? body.detail : bodyText;
     const err = new Error(`通信エラー（状態コード: ${res.status}）`);
     err.status = res.status;
-    err.detail = detail;
+    err.detail = typeof detail === "object" ? { ...detail } : { message: String(detail) };
+    if (typeof err.detail !== "object") err.detail = { message: String(detail) };
+    err.detail.hints = Array.isArray(err.detail.hints) ? err.detail.hints : [];
+    if (res.status === 530) err.detail.hints.unshift(apiConnectionHint(530));
     err.body = body;
     throw err;
   }
@@ -593,9 +605,26 @@ async function postChat({ apiBase, prompt, model, k, signal }) {
   );
 }
 
+function apiConnectionHint(statusOrErr) {
+  const status = typeof statusOrErr === "number" ? statusOrErr : statusOrErr?.status;
+  if (status === 530 || status === 0) {
+    return "530 や接続エラーのときは、API にリクエストが届いていません。cloudflared トンネルと API サーバーが起動しているか確認してください。CORS と表示されても原因はトンネル停止のことが多いです。";
+  }
+  return "APIのURLとネットワーク接続を確認してください。";
+}
+
 async function getSources(apiBase) {
-  const res = await fetch(`${apiBase}/sources`);
-  const bodyText = await res.text();
+  let res, bodyText;
+  try {
+    res = await fetch(`${apiBase}/sources`);
+    bodyText = await res.text();
+  } catch (e) {
+    const err = new Error(`API に接続できません（ネットワークエラー）`);
+    err.status = 0;
+    err.cause = e;
+    err.detail = { message: err.message, hints: [apiConnectionHint(530)] };
+    throw err;
+  }
   let body;
   try {
     body = JSON.parse(bodyText);
@@ -608,6 +637,13 @@ async function getSources(apiBase) {
     err.detail = body && body.detail ? body.detail : bodyText;
     err.body = body;
     err.raw = bodyText;
+    if (res.status === 530) {
+      err.detail = typeof err.detail === "object" ? err.detail : {};
+      if (typeof err.detail === "object") {
+        err.detail.hints = err.detail.hints || [];
+        err.detail.hints.unshift(apiConnectionHint(530));
+      }
+    }
     throw err;
   }
   return body;
@@ -615,8 +651,17 @@ async function getSources(apiBase) {
 
 async function getDiagnostics(apiBase, model) {
   const qs = model ? `?model=${encodeURIComponent(model)}` : "";
-  const res = await fetch(`${apiBase}/diagnostics${qs}`);
-  const bodyText = await res.text();
+  let res, bodyText;
+  try {
+    res = await fetch(`${apiBase}/diagnostics${qs}`);
+    bodyText = await res.text();
+  } catch (e) {
+    const err = new Error(`API に接続できません（ネットワークエラー）`);
+    err.status = 0;
+    err.cause = e;
+    err.detail = { message: err.message, hints: [apiConnectionHint(530)] };
+    throw err;
+  }
   let body;
   try {
     body = JSON.parse(bodyText);
@@ -628,6 +673,13 @@ async function getDiagnostics(apiBase, model) {
     err.status = res.status;
     err.body = body;
     err.raw = bodyText;
+    err.detail = err.detail || (body && body.detail) || bodyText;
+    if (res.status === 530) {
+      const d = typeof err.detail === "object" ? { ...err.detail } : { message: String(err.detail) };
+      d.hints = Array.isArray(d.hints) ? d.hints : [];
+      d.hints.unshift(apiConnectionHint(530));
+      err.detail = d;
+    }
     throw err;
   }
   return body;
@@ -1157,12 +1209,15 @@ function main() {
       return data;
     } catch (e) {
       sourcesStatusEl.textContent = `参照ソースの取得に失敗しました。`;
+      const hintLines =
+        Array.isArray(e?.detail?.hints) && e.detail.hints.length
+          ? e.detail.hints.map((h) => `- ${h}`)
+          : ["- APIのURLが正しいか確認してください", "- そのURLで /health と /status が開けるか確認してください"];
       const lines = [
         `要点: 参照ソースの取得に失敗しました（${summarizeApiError(e)}）`,
         "",
         "対処:",
-        "- APIのURLが正しいか確認してください",
-        "- そのURLで /health と /status が開けるか確認してください",
+        ...hintLines,
       ];
       sourcesListEl.textContent = "";
       sourcesIndexingEl.textContent = "";
@@ -1344,13 +1399,19 @@ function main() {
           diagPollId = null;
         }
       } else {
+        const hintLines =
+          Array.isArray(e?.detail?.hints) && e.detail.hints.length
+            ? e.detail.hints.map((h) => `- ${h}`)
+            : [
+                "- APIのURLが正しいか確認してください",
+                "- そのURLで /health と /status が開けるか確認してください",
+                "- 一時的な問題なら、少し待ってからもう一度お試しください",
+              ];
         const lines = [
           `要点: 環境チェックの取得に失敗しました（${summarizeApiError(e)}）`,
           "",
           "対処:",
-          "- APIのURLが正しいか確認してください",
-          "- そのURLで /health と /status が開けるか確認してください",
-          "- 一時的な問題なら、少し待ってからもう一度お試しください",
+          ...hintLines,
         ];
         diagErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
       }
