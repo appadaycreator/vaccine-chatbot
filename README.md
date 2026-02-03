@@ -315,8 +315,9 @@ curl -sS http://127.0.0.1:8000/status
   - `search_ms`: 類似検索（ベクトルDB）
   - `generate_ms`: 生成（LLM）
   - `total_ms`: 合計
-- **失敗理由**: `stage` / `code` / `message`（例: `EMBEDDING_TIMEOUT`, `SEARCH_TIMEOUT`, `GENERATE_TIMEOUT`, `INDEX_CHECK_TIMEOUT` など）
+- **失敗理由**: `stage` / `code` / `message`（例: `EMBEDDING_TIMEOUT`, `SEARCH_TIMEOUT`, `SEARCH_ERROR`, `GENERATE_TIMEOUT`, `INDEX_CHECK_TIMEOUT` など）
   - `hints` は常に配列で返します（UIが一貫して「対処」を表示できるようにするため）
+  - **検索で 500（SEARCH_ERROR）** のとき: k を小さくする（例: 3→2→1）、`POST /reload` で再インデックス、`GET /status` で `init_error` を確認してください
 
 補足:
 
