@@ -327,7 +327,7 @@ curl -sS http://127.0.0.1:8000/status
   - **Chroma（SQLite）の状態**: 永続化先が読み取り専用・ロック・破損（`readonly database` / `database is locked` など）
   - **次元不一致**: インデックス構築時と現在で embedding モデルが違う（例: 別モデルで再インデックスしたが古い DB を参照している）
   - **リソース・Chroma の不具合**: メモリ不足、Chroma の内部エラー、ディスク障害
-- **実際の例外メッセージ**は、エラーレスポンスの `detail.extra.error` や `GET /status` の `recent_errors` に含まれるので、そこを見ると「なぜ」が分かります。
+- **実際の例外メッセージ**は、エラーレスポンスの `detail.error`（API は `extra` を `detail` にマージするため）や `GET /status` の `recent_errors` に含まれるので、そこを見ると「なぜ」が分かります。
 
 **検索で 500（SEARCH_ERROR）のときの対処手順**
 

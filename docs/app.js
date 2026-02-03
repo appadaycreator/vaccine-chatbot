@@ -771,7 +771,13 @@ function startChatStageProgress({ lastTimings, timeouts, onUpdate } = {}) {
 function formatApiError(err) {
   const detail = err && err.detail ? err.detail : null;
   if (detail && typeof detail === "object") {
-    const msg = detail.message || detail.error || JSON.stringify(detail);
+    let msg = detail.message || detail.error || "";
+    const cause =
+      (detail.extra && typeof detail.extra.error === "string" ? detail.extra.error : detail.error) != null
+        ? String(detail.extra?.error ?? detail.error).trim()
+        : "";
+    if (cause) msg = msg ? `${msg}\n原因: ${cause}` : `原因: ${cause}`;
+    if (!msg) msg = JSON.stringify(detail);
     const stage = detail.stage ? `段階: ${stageLabel(detail.stage)}` : "";
     const code = detail.code ? `コード: ${detail.code}` : "";
     const head = [msg, stage, code].filter(Boolean).join(" / ");
@@ -806,6 +812,11 @@ function summarizeApiError(err) {
     const code = detail.code ? `コード: ${detail.code}` : "";
     const extra = [stage, code].filter(Boolean).join(" / ");
     if (extra) parts.push(extra);
+    // サーバーが返す実際の例外（SEARCH_ERROR 等の原因を表示。API は extra を detail にマージするため detail.error にも入る）
+    const rawCause =
+      detail.extra && typeof detail.extra.error === "string" ? detail.extra.error : detail.error;
+    const cause = rawCause != null ? String(rawCause).trim() : "";
+    if (cause) parts.push(`原因: ${cause}`);
   }
   const text = parts.filter(Boolean).join(" / ");
   return text || "不明なエラー";
