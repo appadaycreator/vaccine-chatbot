@@ -1106,6 +1106,8 @@ function main() {
     refreshDiagnostics();
   });
 
+  let api530NoticeShown = false;
+
   async function refreshSources() {
     const apiBase = sameOriginUi ? "" : normalizeApiBase(apiBaseEl.value);
     if (!sameOriginUi && !apiBase) return;
@@ -1224,6 +1226,14 @@ function main() {
       sourcesErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
       sourcesNextActionsEl.textContent = "";
       setGuardReason("sources", true, "参照ソース情報を取得できませんでした（APIのURLを確認してください）。");
+      if (!api530NoticeShown && e && (e.status === 530 || e.status === 0)) {
+        api530NoticeShown = true;
+        addMessage(
+          "system",
+          "API に接続できていません（530 またはネットワークエラー）。\n\nコンソールに「CORS」と出ていても、多くは API に届いていないことが原因です。\n\n対処: API を動かしている端末で uvicorn（API）を起動し、cloudflared トンネルを再度実行してください（cloudflared tunnel --url http://localhost:8000）。表示された新しい URL を「APIのURL」に貼り直してください。",
+          {}
+        );
+      }
       return null;
     }
   }
@@ -1414,6 +1424,14 @@ function main() {
           ...hintLines,
         ];
         diagErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
+        if (!api530NoticeShown && e && (e.status === 530 || e.status === 0)) {
+          api530NoticeShown = true;
+          addMessage(
+            "system",
+            "API に接続できていません（530 またはネットワークエラー）。\n\nコンソールに「CORS」と出ていても、多くは API に届いていないことが原因です。\n\n対処: API を動かしている端末で uvicorn（API）を起動し、cloudflared トンネルを再度実行してください（cloudflared tunnel --url http://localhost:8000）。表示された新しい URL を「APIのURL」に貼り直してください。",
+            {}
+          );
+        }
       }
       diagListEl.innerHTML = "";
       setGuardReason("diagnostics", false, "");
