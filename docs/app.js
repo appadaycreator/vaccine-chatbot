@@ -635,9 +635,9 @@ function show530Banner() {
   banner.setAttribute("role", "alert");
   banner.className = "banner530";
   banner.innerHTML =
-    '<strong>API に接続できていません（530 / ネットワークエラー）</strong><br>' +
-    'コンソールに「CORS」と出ていても、API に届いていないことが原因です。' +
-    ' API を動かしている端末で <code>uvicorn</code> と <code>cloudflared tunnel --url http://localhost:8000</code> を実行し、表示された URL を「APIのURL」に貼り直してください。' +
+    '<strong>API に接続できていません（530）</strong><br>' +
+    '今の APIのURL は無効です（トンネルが切れているか、古いURLのままです）。コンソールの CORS/530 は、URL を新しいものに貼り直すまで出続けます。<br>' +
+    'この PC のターミナルで <code>cloudflared tunnel --url http://localhost:8000</code> を実行し、表示された <strong>新しい</strong> <code>https://xxxx.trycloudflare.com</code> をコピーして、この画面の「APIのURL」に貼り直し「保存」してください。' +
     ' <button type="button" class="banner530__close" aria-label="閉じる">×</button>';
   const style = document.createElement("style");
   style.textContent =

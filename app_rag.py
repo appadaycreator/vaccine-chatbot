@@ -7,6 +7,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import OllamaEmbeddings
 
 from pdf_ingest import load_pdf_docs_with_ocr_best_effort
+from rag_filter import apply_search_filter
 
 
 def _normalize_newlines(text: str) -> str:
@@ -314,8 +315,9 @@ def _build_answer_prompt(*, question: str, context: str) -> str:
 """.strip()
 
 def rag_chatbot(user_query, *, allow_general_fallback: bool | None = None):
-    # 3. 関連情報の検索
-    docs = vectorstore.similarity_search(user_query, k=3)
+    # 3. 関連情報の検索＋キーワードフィルタ（全落ち時はフォールバックで検索結果をそのまま使用）
+    raw_docs = vectorstore.similarity_search(user_query, k=3)
+    docs, _ = apply_search_filter(user_query, raw_docs)
     context = "\n".join([doc.page_content for doc in docs])
 
     # 4. LLMへの問い合わせ

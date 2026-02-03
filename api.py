@@ -30,6 +30,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel, Field
 
 from pdf_ingest import load_pdf_docs_with_ocr_best_effort, ocr_settings_signature
+from rag_filter import apply_search_filter
 
 
 DEFAULT_PDF_PATH = "vaccine_manual.pdf"  # 単体PDF（任意）
@@ -149,120 +150,6 @@ def _new_request_id() -> str:
 # 回答品質（医療系の言い方）を最低ラインで保証するための挙動
 # - 断定・誤誘導を避けるため、根拠（sources）が取れない場合は必ず「資料にない」を返す
 # - 回答本文は“普通の会話文”として返し、見出し（結論/根拠 等）を強制しない
-
-_JP_TERM_RE = re.compile(r"[一-龥ぁ-んァ-ン]{2,}|[A-Za-z0-9]{2,}")
-_DEFAULT_TERM_STOPWORDS = {
-    # 日本語のよくある汎用語（ノイズを減らす）
-    "です",
-    "ます",
-    "する",
-    "した",
-    "して",
-    "いる",
-    "ある",
-    "こと",
-    "これ",
-    "それ",
-    "ため",
-    "場合",
-    "どの",
-    "どれ",
-    "どこ",
-    "いつ",
-    "なに",
-    "何",
-    "方法",
-    "目安",
-    "目的",
-    "要約",
-    "教えて",
-    "ください",
-    "について",
-    "ですか",
-    "どうすれば",
-    "どのくらい",
-    "範囲",
-    "資料",
-    "記載",
-    "アンケート",
-}
-
-
-def _keyword_terms(text: str) -> set[str]:
-    s = (text or "").strip()
-    if not s:
-        return set()
-    terms = {m.group(0) for m in _JP_TERM_RE.finditer(s)}
-    # 正規化（小文字化）: 英数字のみ
-    out: set[str] = set()
-    for t in terms:
-        tt = t.strip()
-        if not tt:
-            continue
-        if tt.isascii():
-            tt = tt.lower()
-        if tt in _DEFAULT_TERM_STOPWORDS:
-            continue
-        # 1文字（条件で排除しているが念のため）
-        if len(tt) < 2:
-            continue
-        out.add(tt)
-    return out
-
-
-def _keyword_overlap_score(terms: set[str], text: str) -> int:
-    if not terms:
-        return 0
-    body = (text or "")
-    if not body:
-        return 0
-    low = body.lower()
-    score = 0
-    for t in terms:
-        needle = t.lower() if t.isascii() else t
-        if needle and needle in low:
-            score += 1
-    return score
-
-
-def _filter_docs_by_keyword_overlap(prompt: str, docs: list[Any]) -> tuple[list[Any], dict[str, Any]]:
-    """
-    ベクトル検索が“それっぽいがズレている”ケース（例: QRコード手順が根拠に出る等）を抑えるための軽いフィルタ。
-    - 既定: 質問のキーワードが1つも含まれないdocは捨てる
-    - 全部捨てたら「根拠なし」として扱う（→ フォールバック or 資料にない）
-    """
-    min_overlap = int(os.environ.get("SEARCH_KEYWORD_OVERLAP_MIN", "1") or "1")
-    min_overlap = max(0, min(min_overlap, 10))
-    terms = _keyword_terms(prompt)
-    # 「7日」「2週間」など“期間/数字が絡む質問”はズレると致命的なので、少しだけ厳しめにする
-    if re.search(r"\d+\s*(日|日間|週間|週|か月|ヶ月|ヵ月)", prompt or ""):
-        min_overlap = max(min_overlap, 2)
-    if min_overlap <= 0 or not terms or not docs:
-        return docs, {"keyword_filter": {"enabled": bool(min_overlap > 0), "terms": len(terms), "kept": len(docs), "dropped": 0}}
-
-    kept: list[Any] = []
-    dropped = 0
-    best = 0
-    for d in docs:
-        txt = getattr(d, "page_content", "") or ""
-        sc = _keyword_overlap_score(terms, txt)
-        best = max(best, sc)
-        if sc >= min_overlap:
-            kept.append(d)
-        else:
-            dropped += 1
-    meta = {
-        "keyword_filter": {
-            "enabled": True,
-            "terms": len(terms),
-            "min_overlap": min_overlap,
-            "best": best,
-            "kept": len(kept),
-            "dropped": dropped,
-            "all_dropped": bool(len(kept) == 0 and len(docs) > 0),
-        }
-    }
-    return kept, meta
 
 
 def _extract_candidates(docs: list[Any], *, limit: int = 3) -> list[dict[str, Any]]:
@@ -2177,25 +2064,14 @@ async def _run_search(
             # 再試行が失敗しても、元の検索結果（空）のまま返す
             pass
 
-    # 追加の安全策: “質問と関係ないページ”が根拠に混ざるのを抑制（キーワード一致の薄いdocを落とす）
+    # キーワードフィルタ＋全落ち時フォールバック（rag_filter で共通化）
     raw_docs = list(docs or [])
-    filtered_docs, kw_meta = _filter_docs_by_keyword_overlap(prompt, raw_docs)
+    docs, kw_meta = apply_search_filter(prompt, raw_docs)
     timings.update(kw_meta)
-    candidates: list[Any] = []
-    try:
-        kf = (kw_meta or {}).get("keyword_filter") if isinstance(kw_meta, dict) else None
-        all_dropped = bool(isinstance(kf, dict) and kf.get("all_dropped") is True)
-        if all_dropped and raw_docs:
-            # “該当箇所は特定できない”扱いにする一方で、UIで確認できるよう候補を残す
-            candidates = raw_docs
-    except Exception:
-        candidates = []
-
-    docs = filtered_docs
 
     timings["total_ms"] = int((time.perf_counter() - t_total0) * 1000)
     context = _format_context(docs)
-    return {"docs": docs, "context": context, "timings": timings, "candidates": candidates}
+    return {"docs": docs, "context": context, "timings": timings, "candidates": []}
 
 
 async def _run_generate(prompt: str, context: str, model: str, max_tokens: int, generate_timeout_s: int) -> dict[str, Any]:

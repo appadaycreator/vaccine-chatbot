@@ -11,6 +11,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from pdf_ingest import load_pdf_docs_with_ocr_best_effort, ocr_settings_signature
+from rag_filter import apply_search_filter
 
 # ページの設定
 st.set_page_config(page_title="ワクチン接種後健康観察アシスタント", page_icon="🏥")
@@ -538,8 +539,9 @@ if prompt:
     with st.chat_message("assistant"):
         try:
             with st.spinner("資料を確認中..."):
-                # 検索
-                docs = vectorstore.similarity_search(prompt, k=k)
+                # 検索＋キーワードフィルタ（全落ち時はフォールバックで検索結果をそのまま使用）
+                raw_docs = vectorstore.similarity_search(prompt, k=k)
+                docs, _ = apply_search_filter(prompt, raw_docs)
                 context = "\n".join([doc.page_content for doc in docs])
                 sources = _extract_sources(docs)
 
