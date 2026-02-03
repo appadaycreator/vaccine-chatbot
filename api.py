@@ -2115,20 +2115,38 @@ async def _run_search(
         )
     except Exception as e:
         timings["search_ms"] = int((time.perf_counter() - t_search0) * 1000)
-        _http_error(
-            stage="search",
-            code="SEARCH_ERROR",
-            message="類似検索に失敗しました",
-            hints=[
-                "検索が遅い/失敗する場合は k を小さくして試してください（例: 3→2→1）",
-                "POST /reload で再インデックスを試してください",
-                "GET /status で init_error を確認してください",
-                "サーバーログまたは GET /status の recent_errors で詳細を確認できます",
-            ],
-            timings=timings,
-            extra={"error": str(e)},
-            status_code=500,
-        )
+        docs = []
+        last_err = e
+        # k>1 のときは k=1 で1回だけ再試行（負荷やChromaの一時不調で成功することがある）
+        if k > 1:
+            retry_k1_start = time.perf_counter()
+            try:
+                fn = getattr(vs, "similarity_search_by_vector", None)
+                if callable(fn):
+                    docs = await asyncio.wait_for(asyncio.to_thread(fn, vec, k=1), timeout=search_timeout_s)
+                else:
+                    docs = await asyncio.wait_for(asyncio.to_thread(vs.similarity_search, prompt, k=1), timeout=search_timeout_s)
+                timings["search_retry_k1_ms"] = int((time.perf_counter() - retry_k1_start) * 1000)
+                timings["search_retry_k1"] = True
+            except Exception as e2:
+                last_err = e2
+                timings["search_retry_k1_ms"] = int((time.perf_counter() - retry_k1_start) * 1000)
+                timings["search_retry_k1"] = False
+        if not docs:
+            _http_error(
+                stage="search",
+                code="SEARCH_ERROR",
+                message="類似検索に失敗しました",
+                hints=[
+                    "検索が遅い/失敗する場合は k を小さくして試してください（例: 3→2→1）",
+                    "POST /reload で再インデックスを試してください",
+                    "GET /status で init_error を確認してください",
+                    "サーバーログまたは GET /status の recent_errors で詳細を確認できます",
+                ],
+                timings=timings,
+                extra={"error": str(last_err)},
+                status_code=500,
+            )
 
     # まれに検索結果が0件になるケースを救う（kを増やして1回だけ再試行）
     # - “資料にあるはずなのに常に資料にない” を軽減する目的

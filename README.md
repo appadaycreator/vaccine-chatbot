@@ -317,7 +317,33 @@ curl -sS http://127.0.0.1:8000/status
   - `total_ms`: 合計
 - **失敗理由**: `stage` / `code` / `message`（例: `EMBEDDING_TIMEOUT`, `SEARCH_TIMEOUT`, `SEARCH_ERROR`, `GENERATE_TIMEOUT`, `INDEX_CHECK_TIMEOUT` など）
   - `hints` は常に配列で返します（UIが一貫して「対処」を表示できるようにするため）
-  - **検索で 500（SEARCH_ERROR）** のとき: k を小さくする（例: 3→2→1）、`POST /reload` で再インデックス、`GET /status` で `init_error` を確認してください
+  - **検索で 500（SEARCH_ERROR）** のとき: 下記「検索で 500 のときの対処手順」を参照してください
+
+**なぜ 500（SEARCH_ERROR）になるか**
+
+- `/chat` や `/search` では、**embedding（質問のベクトル化）** のあと、**Chroma（ベクトルDB）で類似検索**を実行します。
+- この「類似検索」の処理中に、**タイムアウト以外の例外**が発生すると、API はそれを **500 SEARCH_ERROR** として返します（HTTP の 500 = サーバー側の内部エラー）。
+- 想定される原因の例:
+  - **Chroma（SQLite）の状態**: 永続化先が読み取り専用・ロック・破損（`readonly database` / `database is locked` など）
+  - **次元不一致**: インデックス構築時と現在で embedding モデルが違う（例: 別モデルで再インデックスしたが古い DB を参照している）
+  - **リソース・Chroma の不具合**: メモリ不足、Chroma の内部エラー、ディスク障害
+- **実際の例外メッセージ**は、エラーレスポンスの `detail.extra.error` や `GET /status` の `recent_errors` に含まれるので、そこを見ると「なぜ」が分かります。
+
+**検索で 500（SEARCH_ERROR）のときの対処手順**
+
+1. **API サーバー側で原因確認**
+   - `GET /status` を開く（例: ブラウザで `https://<APIのURL>/status`、または `curl https://<APIのURL>/status`）。
+   - レスポンスの **`init_error`** に値があれば、インデックス構築失敗などの原因です。
+   - **`recent_errors`** に直近のエラー詳細（メッセージ）が出ます。
+2. **再インデックス**
+   - `POST /reload` で再インデックスを実行。完了するまで待ってから、再度 `/chat` を試す。
+3. **k を小さくする**
+   - UI の検索の強さ（k）を 2 や 1 に下げて再送する（エラー時の「k=2 にして再送」「k=1 にして再送」ボタンでも可）。
+4. **サーバー（API を動かしている端末）側の確認**
+   - Ollama が起動しているか（`brew services list` や `ollama list`）。
+   - `nomic-embed-text` が入っているか（`ollama pull nomic-embed-text`）。
+   - Chroma の永続化先（既定は `./chroma_db`）の権限・読み書き可能か（「readonly database」が出ていないか）。
+   - ターミナルや launchd のログに、検索時に出ている Python の例外メッセージがないか確認。
 
 補足:
 
