@@ -628,6 +628,31 @@ function isLikely530OrNetworkError(e) {
 const API530_NOTICE_TEXT =
   "API に接続できていません（530 またはネットワークエラー）。\n\nコンソールに「CORS」と出ていても、多くは API に届いていないことが原因です。\n\n対処: API を動かしている端末で uvicorn（API）を起動し、cloudflared トンネルを再度実行してください（cloudflared tunnel --url http://localhost:8000）。表示された新しい URL を「APIのURL」に貼り直してください。";
 
+function show530Banner() {
+  if (document.getElementById("banner530")) return;
+  const banner = document.createElement("div");
+  banner.id = "banner530";
+  banner.setAttribute("role", "alert");
+  banner.className = "banner530";
+  banner.innerHTML =
+    '<strong>API に接続できていません（530 / ネットワークエラー）</strong><br>' +
+    'コンソールに「CORS」と出ていても、API に届いていないことが原因です。' +
+    ' API を動かしている端末で <code>uvicorn</code> と <code>cloudflared tunnel --url http://localhost:8000</code> を実行し、表示された URL を「APIのURL」に貼り直してください。' +
+    ' <button type="button" class="banner530__close" aria-label="閉じる">×</button>';
+  const style = document.createElement("style");
+  style.textContent =
+    ".banner530{position:sticky;top:0;z-index:100;margin:0 0 1rem;padding:12px 40px 12px 16px;background:#b91c1c;color:#fff;font-size:0.95rem;line-height:1.5;box-shadow:0 2px 8px rgba(0,0,0,0.2);}" +
+    ".banner530 code{background:rgba(255,255,255,0.25);padding:2px 6px;border-radius:4px;}" +
+    ".banner530__close{position:absolute;top:8px;right:8px;width:28px;height:28px;padding:0;border:none;background:rgba(255,255,255,0.2);color:#fff;font-size:1.2rem;line-height:1;cursor:pointer;border-radius:6px;}" +
+    ".banner530__close:hover{background:rgba(255,255,255,0.35);}";
+  document.head.appendChild(style);
+  const mainEl = document.getElementById("main");
+  if (mainEl) {
+    mainEl.insertBefore(banner, mainEl.firstChild);
+    banner.querySelector(".banner530__close").addEventListener("click", () => banner.remove());
+  }
+}
+
 async function getSources(apiBase) {
   let res, bodyText;
   try {
@@ -1244,6 +1269,7 @@ async function main() {
       if (!api530NoticeShown && isLikely530OrNetworkError(e)) {
         api530NoticeShown = true;
         addMessage("system", API530_NOTICE_TEXT, {});
+        show530Banner();
       }
       return null;
     }
@@ -1438,6 +1464,7 @@ async function main() {
         if (!api530NoticeShown && isLikely530OrNetworkError(e)) {
           api530NoticeShown = true;
           addMessage("system", API530_NOTICE_TEXT, {});
+          show530Banner();
         }
       }
       diagListEl.innerHTML = "";
@@ -1931,12 +1958,15 @@ async function main() {
 
   if (!sameOriginUi && normalizeApiBase(apiBaseEl.value)) {
     const [sourcesResult, diagResult] = await Promise.allSettled([refreshSources(), refreshDiagnostics()]);
-    const failed = [sourcesResult, diagResult].some((r) => r.status === "rejected");
-    if (failed && !api530NoticeShown) {
-      const err = sourcesResult.status === "rejected" ? sourcesResult.reason : diagResult.reason;
-      if (isLikely530OrNetworkError(err)) {
+    const rejected = [sourcesResult, diagResult].filter((r) => r.status === "rejected");
+    const anyRejected = rejected.length > 0;
+    const anyNull = (sourcesResult.status === "fulfilled" && sourcesResult.value === null) || (diagResult.status === "fulfilled" && diagResult.value === null);
+    if (!api530NoticeShown && (anyRejected || anyNull)) {
+      const err = anyRejected ? rejected[0].reason : null;
+      if (err ? isLikely530OrNetworkError(err) : anyNull) {
         api530NoticeShown = true;
         addMessage("system", API530_NOTICE_TEXT, {});
+        show530Banner();
       }
     }
   } else {
@@ -1955,6 +1985,7 @@ async function main() {
     console.error("main error", e);
     if (isLikely530OrNetworkError(e)) {
       addMessage("system", API530_NOTICE_TEXT, {});
+      show530Banner();
     }
   }
 })();
