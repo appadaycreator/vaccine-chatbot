@@ -61,7 +61,8 @@ def filter_docs_by_keyword_overlap(
     質問のキーワードが含まれない doc を落とす。戻り値は (kept_docs, meta)。
     """
     if min_overlap is None:
-        min_overlap = int(os.environ.get("SEARCH_KEYWORD_OVERLAP_MIN", "1") or "1")
+        # 既定 0: 検索結果を落とさずコンテキストに使う（短い質問でも回答が返りやすい）
+        min_overlap = int(os.environ.get("SEARCH_KEYWORD_OVERLAP_MIN", "0") or "0")
     min_overlap = max(0, min(min_overlap, 10))
     terms = _keyword_terms(prompt)
     if re.search(r"\d+\s*(日|日間|週間|週|か月|ヶ月|ヵ月)", prompt or ""):
