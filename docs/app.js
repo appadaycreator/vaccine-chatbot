@@ -1,3 +1,4 @@
+// vaccine-chatbot UI (530/CORS notice in main + isLikely530OrNetworkError)
 function $(id) {
   const el = document.getElementById(id);
   if (!el) throw new Error(`missing element: ${id}`);
@@ -613,6 +614,20 @@ function apiConnectionHint(statusOrErr) {
   return "APIのURLとネットワーク接続を確認してください。";
 }
 
+function isLikely530OrNetworkError(e) {
+  if (!e) return false;
+  const status = e.status;
+  if (status === 530 || status === 0) return true;
+  const msg = String(e.message || e.reason || "");
+  if (/接続できません|Failed to fetch|NetworkError|Load failed|CORS|blocked/i.test(msg)) return true;
+  const cause = e.cause && String(e.cause.message || e.cause);
+  if (cause && /Failed to fetch|NetworkError|Load failed/i.test(cause)) return true;
+  return false;
+}
+
+const API530_NOTICE_TEXT =
+  "API に接続できていません（530 またはネットワークエラー）。\n\nコンソールに「CORS」と出ていても、多くは API に届いていないことが原因です。\n\n対処: API を動かしている端末で uvicorn（API）を起動し、cloudflared トンネルを再度実行してください（cloudflared tunnel --url http://localhost:8000）。表示された新しい URL を「APIのURL」に貼り直してください。";
+
 async function getSources(apiBase) {
   let res, bodyText;
   try {
@@ -900,7 +915,7 @@ function buildConversationLogText({ includeSources = true } = {}) {
   return parts.filter(Boolean).join("\n\n---\n\n");
 }
 
-function main() {
+async function main() {
   const apiBaseEl = $("apiBase");
   const modelEl = $("model");
   const kEl = $("k");
@@ -1226,13 +1241,9 @@ function main() {
       sourcesErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
       sourcesNextActionsEl.textContent = "";
       setGuardReason("sources", true, "参照ソース情報を取得できませんでした（APIのURLを確認してください）。");
-      if (!api530NoticeShown && e && (e.status === 530 || e.status === 0)) {
+      if (!api530NoticeShown && isLikely530OrNetworkError(e)) {
         api530NoticeShown = true;
-        addMessage(
-          "system",
-          "API に接続できていません（530 またはネットワークエラー）。\n\nコンソールに「CORS」と出ていても、多くは API に届いていないことが原因です。\n\n対処: API を動かしている端末で uvicorn（API）を起動し、cloudflared トンネルを再度実行してください（cloudflared tunnel --url http://localhost:8000）。表示された新しい URL を「APIのURL」に貼り直してください。",
-          {}
-        );
+        addMessage("system", API530_NOTICE_TEXT, {});
       }
       return null;
     }
@@ -1424,13 +1435,9 @@ function main() {
           ...hintLines,
         ];
         diagErrorEl.innerHTML = escapeHtml(lines.join("\n")).replaceAll("\n", "<br>");
-        if (!api530NoticeShown && e && (e.status === 530 || e.status === 0)) {
+        if (!api530NoticeShown && isLikely530OrNetworkError(e)) {
           api530NoticeShown = true;
-          addMessage(
-            "system",
-            "API に接続できていません（530 またはネットワークエラー）。\n\nコンソールに「CORS」と出ていても、多くは API に届いていないことが原因です。\n\n対処: API を動かしている端末で uvicorn（API）を起動し、cloudflared トンネルを再度実行してください（cloudflared tunnel --url http://localhost:8000）。表示された新しい URL を「APIのURL」に貼り直してください。",
-            {}
-          );
+          addMessage("system", API530_NOTICE_TEXT, {});
         }
       }
       diagListEl.innerHTML = "";
@@ -1922,12 +1929,33 @@ function main() {
       : "APIのURLを設定してから、質問を送ってください。\n\n（cloudflared の HTTPS URL を貼れば、GitHub Pages からでも利用できます）"
   );
 
-  refreshSources();
-  refreshDiagnostics();
+  if (!sameOriginUi && normalizeApiBase(apiBaseEl.value)) {
+    const [sourcesResult, diagResult] = await Promise.allSettled([refreshSources(), refreshDiagnostics()]);
+    const failed = [sourcesResult, diagResult].some((r) => r.status === "rejected");
+    if (failed && !api530NoticeShown) {
+      const err = sourcesResult.status === "rejected" ? sourcesResult.reason : diagResult.reason;
+      if (isLikely530OrNetworkError(err)) {
+        api530NoticeShown = true;
+        addMessage("system", API530_NOTICE_TEXT, {});
+      }
+    }
+  } else {
+    refreshSources();
+    refreshDiagnostics();
+  }
   // “動かない原因”がすぐ見えるように、軽くポーリング（失敗しても送信はブロックしない）
   diagPollId = setInterval(() => refreshDiagnostics(), 30000);
   updateComposerState();
 }
 
-main();
+(async function () {
+  try {
+    await main();
+  } catch (e) {
+    console.error("main error", e);
+    if (isLikely530OrNetworkError(e)) {
+      addMessage("system", API530_NOTICE_TEXT, {});
+    }
+  }
+})();
 
